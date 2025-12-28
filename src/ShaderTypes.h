@@ -3,8 +3,9 @@
 
 enum VertexAttributes {
     VertexAttributePosition = 0,
-    VertexAttributeNormal   = 1, 
-    VertexAttributeTexcoord = 2  
+    VertexAttributeColor    = 1,
+    VertexAttributeNormal   = 2, 
+    VertexAttributeTexcoord = 3  
 };
 
 enum BufferIndices {
@@ -16,6 +17,7 @@ enum BufferIndices {
 // 顶点结构体
 struct Vertex {
     simd::float3 position;
+    simd::float3 color;
     simd::float3 normal;
     simd::float2 texcoord;
 };

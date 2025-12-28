@@ -6,7 +6,7 @@ using namespace metal;
 // 定义顶点着色器的输出（光栅化插值数据）
 struct RasterizerData {
     float4 position [[position]];
-    float3 normal;
+    float4 color;
     float2 texcoord;
 };
 
@@ -24,7 +24,7 @@ vertex RasterizerData vertexMain(
     
     // 读取当前顶点的属性
     float3 vertexPosition = vertices[vertexID].position;
-    float3 normal = vertices[vertexID].normal; // Normal with attribute(VertexAttributeNormal)
+    float3 color = vertices[vertexID].color;
     float2 texcoord = vertices[vertexID].texcoord;
     
     // Convert position to float4 for matrix multiplication
@@ -45,13 +45,9 @@ vertex RasterizerData vertexMain(
     // Calculate final position using View/Projection matrices
     pos = uniforms.projectionMatrix * uniforms.viewMatrix * pos;
     
-    // Transform normal by model matrix (rotation only): Multiply normal by instance.modelMatrix
-    // For correctness: out.normal = (instance.modelMatrix * float4(v.normal, 0.0)).xyz;
-    float3 transformedNormal = (instance.modelMatrix * float4(normal, 0.0)).xyz;
-    
     // Output position
     out.position = pos;
-    out.normal = transformedNormal;
+    out.color = vector_float4(color, 1.0);
     out.texcoord = texcoord;
     
     return out;
@@ -59,42 +55,19 @@ vertex RasterizerData vertexMain(
 
 fragment float4 fragmentMain(
     RasterizerData in [[stage_in]],
-    texture2d<float> colorTexture [[texture(0)]],
-    constant Uniforms &uniforms [[buffer(BufferIndexUniforms)]]
+    texture2d<float> colorTexture [[texture(0)]]
 ) {
     // Define a constexpr sampler inside the shader function
-    // Update the constexpr sampler to use Repeat address mode for both S and T coordinates
-    constexpr sampler textureSampler(mag_filter::linear, min_filter::linear, address::repeat);
+    constexpr sampler textureSampler(mag_filter::linear, min_filter::linear);
     
     // Sample the texture color
-    float4 textureColor = colorTexture.sample(textureSampler, in.texcoord);
-    
-    // DEBUG: If texture is fully transparent/black, show Red to indicate load failure
-    if (textureColor.a == 0.0 && textureColor.r == 0.0 && textureColor.g == 0.0 && textureColor.b == 0.0) {
-        return float4(1.0, 0.0, 0.0, 1.0); // Bright Red = Texture is empty/black
-    }
+    float4 color = colorTexture.sample(textureSampler, in.texcoord);
     
     // Check Alpha: If color.a < 0.5, call discard_fragment()
-    if (textureColor.a < 0.5) {
+    if (color.a < 0.5) {
         discard_fragment();
     }
     
-    // Normalize the input normal and light direction
-    float3 normal = normalize(in.normal);
-    float3 lightDir = normalize(uniforms.lightDirection);
-    
-    // Diffuse: Calculate float NdotL = max(dot(in.normal, uniforms.lightDirection), 0.0);
-    float NdotL = max(dot(normal, lightDir), 0.0);
-    
-    // Ambient: Define a base ambient level, e.g., 0.4
-    float ambient = 0.4;
-    
-    // Mix: float3 lighting = uniforms.lightColor * (NdotL + 0.4);
-    float3 lighting = uniforms.lightColor * (NdotL + ambient);
-    
-    // Apply lighting to the texture color: float4 finalColor = float4(textureColor.rgb * lighting, textureColor.a);
-    float4 finalColor = float4(textureColor.rgb * lighting, textureColor.a);
-    
-    // Return finalColor
-    return finalColor;
+    // Return the sampled color
+    return color;
 }
