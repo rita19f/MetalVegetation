@@ -20,7 +20,7 @@ private:
     MTL::Device* m_device;
     MTL::CommandQueue* m_commandQueue;
     CA::MetalLayer* m_metalLayer; 
-    MTL::RenderPipelineState* m_grassPSO; // 草管线状态
+    MTL::RenderPipelineState* m_pso; // 管线状态 (grass)
     MTL::RenderPipelineState* m_groundPSO; // 地面管线状态
     MTL::Buffer* m_vertexBuffer;     // 存放顶点数据
     MTL::Buffer* m_indexBuffer;      // 存放索引数据
@@ -29,8 +29,8 @@ private:
     MTL::Buffer* m_groundVertexBuffer; // 存放地面顶点数据
     MTL::DepthStencilState* m_depthStencilState;
     MTL::Texture* m_depthTexture;    // 深度纹理
-    Texture* m_texture;               // 纹理
-    Texture* m_groundTexture;         // 地面纹理 (To store the soil texture)
+    Texture* m_texture;               // 纹理 (grass)
+    Texture* m_groundTexture;         // 地面纹理
     Camera* m_camera;                 // 相机
     
     // Mouse input tracking
