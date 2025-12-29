@@ -4,11 +4,20 @@
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/type_ptr.hpp>
+#include <CoreGraphics/CoreGraphics.h>
 #include <iostream>
 #include <cstring>
 #include <cstdint>
 #include <random>
 #include <cmath>
+
+// Grass mesh configuration: vertical segments for smooth bending
+static constexpr int kGrassSegments = 7;                 // At least 7 height segments
+static constexpr int kGrassRows = kGrassSegments + 1;    // Rows of vertices
+static constexpr int kGrassVertsPerRow = 2;              // Left + right per row
+static constexpr int kGrassVertexCount = kGrassRows * kGrassVertsPerRow;
+static constexpr int kGrassIndicesPerSegment = 6;        // 2 triangles per segment
+static constexpr int kGrassIndexCount = kGrassSegments * kGrassIndicesPerSegment;
 
 // Helper function to convert glm::mat4 to simd::float4x4
 static simd::float4x4 glmToSimd(const glm::mat4& glmMat) {
@@ -38,6 +47,8 @@ Renderer::Renderer(MTL::Device* device, CA::MetalLayer* layer)
     , m_groundVertexBuffer(nullptr)
     , m_depthStencilState(nullptr)
     , m_depthTexture(nullptr)
+    , m_msaaColorTexture(nullptr)
+    , m_msaaDepthTexture(nullptr)
     , m_texture(nullptr)
     , m_groundTexture(nullptr)
     , m_camera(nullptr)
@@ -57,6 +68,11 @@ Renderer::Renderer(MTL::Device* device, CA::MetalLayer* layer)
     buildInstanceBuffer();
     buildTextures();
     buildGround();
+    
+    // Initialize MSAA textures with initial layer size
+    // Get drawable size from metal layer
+    CGSize drawableSize = m_metalLayer->drawableSize();
+    resize(static_cast<int>(drawableSize.width), static_cast<int>(drawableSize.height));
 }
 
 Renderer::~Renderer()
@@ -117,30 +133,53 @@ void Renderer::draw()
     // Create Descriptor: Create a new MTL::RenderPassDescriptor using MTL::RenderPassDescriptor::alloc()->init()
     MTL::RenderPassDescriptor* renderPassDescriptor = MTL::RenderPassDescriptor::alloc()->init();
     
-    // Setup Color Attachment:
+    // Setup Color Attachment with MSAA:
     // Access renderPassDescriptor->colorAttachments()->object(0)
     MTL::RenderPassColorAttachmentDescriptor* colorAttachment = renderPassDescriptor->colorAttachments()->object(0);
-    // Set its texture to drawable->texture()
-    colorAttachment->setTexture(drawable->texture());
+    
+    // Render to MSAA texture (4x multisample)
+    if (m_msaaColorTexture) {
+        colorAttachment->setTexture(m_msaaColorTexture);
+        // Resolve to drawable texture
+        colorAttachment->setResolveTexture(drawable->texture());
+    } else {
+        // Fallback: render directly to drawable if MSAA texture not available
+        colorAttachment->setTexture(drawable->texture());
+    }
+    
     // Set loadAction to MTL::LoadActionClear
     colorAttachment->setLoadAction(MTL::LoadActionClear);
     // Set clearColor to sky blue (0.5, 0.7, 1.0, 1.0)
     renderPassDescriptor->colorAttachments()->object(0)->setClearColor(MTL::ClearColor(0.5, 0.7, 1.0, 1.0));
-    // Set storeAction to MTL::StoreActionStore
-    colorAttachment->setStoreAction(MTL::StoreActionStore);
     
-    // Setup Depth Attachment (Crucial):
-    // Check if m_depthTexture is not null
-    if (m_depthTexture) {
+    // Set storeAction: Store and resolve if MSAA, otherwise just store
+    if (m_msaaColorTexture) {
+        colorAttachment->setStoreAction(MTL::StoreActionMultisampleResolve);
+    } else {
+        colorAttachment->setStoreAction(MTL::StoreActionStore);
+    }
+    
+    // Setup Depth Attachment with MSAA:
+    // Check if MSAA depth texture is available
+    if (m_msaaDepthTexture && m_depthTexture) {
         // Access renderPassDescriptor->depthAttachment()
         MTL::RenderPassDepthAttachmentDescriptor* depthAttachment = renderPassDescriptor->depthAttachment();
-        // Set its texture to m_depthTexture
-        depthAttachment->setTexture(m_depthTexture);
+        // Render to MSAA depth texture
+        depthAttachment->setTexture(m_msaaDepthTexture);
+        // Resolve to non-MSAA depth texture
+        depthAttachment->setResolveTexture(m_depthTexture);
         // Set loadAction to MTL::LoadActionClear
         depthAttachment->setLoadAction(MTL::LoadActionClear);
-        // Set storeAction to MTL::StoreActionDontCare
-        depthAttachment->setStoreAction(MTL::StoreActionDontCare);
+        // Set storeAction to resolve MSAA depth
+        depthAttachment->setStoreAction(MTL::StoreActionMultisampleResolve);
         // Set clearDepth to 1.0
+        depthAttachment->setClearDepth(1.0);
+    } else if (m_depthTexture) {
+        // Fallback: use non-MSAA depth texture
+        MTL::RenderPassDepthAttachmentDescriptor* depthAttachment = renderPassDescriptor->depthAttachment();
+        depthAttachment->setTexture(m_depthTexture);
+        depthAttachment->setLoadAction(MTL::LoadActionClear);
+        depthAttachment->setStoreAction(MTL::StoreActionDontCare);
         depthAttachment->setClearDepth(1.0);
     }
     
@@ -167,6 +206,10 @@ void Renderer::draw()
         
         // Set uniforms.lightColor. Use simd::make_float3(1.0f, 1.0f, 0.9f) (Warm sunlight)
         uniforms.lightColor = simd::make_float3(1.0f, 1.0f, 0.9f);
+        
+        // Set uniforms.cameraPosition for cylindrical billboarding
+        glm::vec3 camPos = m_camera->position;
+        uniforms.cameraPosition = simd::make_float3(camPos.x, camPos.y, camPos.z);
         
         // Copy uniforms to buffer
         void* uniformContents = m_uniformBuffer->contents();
@@ -220,7 +263,13 @@ void Renderer::draw()
     renderEncoder->setFragmentTexture(m_texture->getMetalTexture(), 0);
     
     // Draw Instanced Grass
-    renderEncoder->drawIndexedPrimitives(MTL::PrimitiveTypeTriangle, NS::UInteger(6), MTL::IndexTypeUInt16, m_indexBuffer, NS::UInteger(0), NS::UInteger(10000));
+    renderEncoder->drawIndexedPrimitives(
+        MTL::PrimitiveTypeTriangle,
+        NS::UInteger(kGrassIndexCount),
+        MTL::IndexTypeUInt16,
+        m_indexBuffer,
+        NS::UInteger(0),
+        NS::UInteger(10000));
     
     // End encoding
     renderEncoder->endEncoding();
@@ -276,6 +325,12 @@ void Renderer::buildShaders()
     // Set depth pixel format
     pipelineDescriptor->setDepthAttachmentPixelFormat(MTL::PixelFormatDepth32Float);
     
+    // Enable 4x MSAA for grass rendering
+    pipelineDescriptor->setSampleCount(4);
+    
+    // Enable Alpha-to-Coverage for smooth grass edges
+    pipelineDescriptor->setAlphaToCoverageEnabled(true);
+    
     // Create m_pso using device->newRenderPipelineState. Handle errors if any.
     m_pso = m_device->newRenderPipelineState(pipelineDescriptor, &error);
     
@@ -325,6 +380,9 @@ void Renderer::buildShaders()
     // Set depth pixel format
     groundPipelineDescriptor->setDepthAttachmentPixelFormat(MTL::PixelFormatDepth32Float);
     
+    // Enable 4x MSAA for ground rendering (optional, but consistent)
+    groundPipelineDescriptor->setSampleCount(4);
+    
     // Create m_groundPSO
     m_groundPSO = m_device->newRenderPipelineState(groundPipelineDescriptor, &error);
     
@@ -371,20 +429,47 @@ void Renderer::buildShaders()
 
 void Renderer::buildBuffers()
 {
-    // Define 4 vertices for a quad (blade of grass)
-    // Bottom-Left: {-0.1, -0.5, 0}, UV: {0, 1}
-    // Bottom-Right: { 0.1, -0.5, 0}, UV: {1, 1}
-    // Top-Left: {-0.1, 0.5, 0}, UV: {0, 0}
-    // Top-Right: { 0.1, 0.5, 0}, UV: {1, 0}
-    // Normal: Point normals straight UP (0, 1, 0) for all vertices
-    // This makes grass look soft and evenly lit by the sun, avoiding black appearance when rotated away
-    Vertex vertices[4] = {
-        { {-0.1f, -0.5f, 0.0f}, {0.0f, 1.0f, 0.0f}, {0.0f, 1.0f} },  // Bottom-Left
-        { { 0.1f, -0.5f, 0.0f}, {0.0f, 1.0f, 0.0f}, {1.0f, 1.0f} },  // Bottom-Right
-        { {-0.1f,  0.5f, 0.0f}, {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f} },  // Top-Left
-        { { 0.1f,  0.5f, 0.0f}, {0.0f, 1.0f, 0.0f}, {1.0f, 0.0f} }   // Top-Right
-    };
-    
+    // Define a vertical strip for a blade of grass with multiple height segments.
+    // This increases geometric detail so bending in the vertex shader looks smooth and organic.
+    //
+    // Coordinate system for a single blade in local space:
+    //  - Y from -0.5 (root) to +0.5 (tip)
+    //  - X is half-width; we taper from a wider base to a very thin tip
+    //  - Z stays 0 in local space; billboarding handles facing the camera
+    //
+    // We generate kGrassRows rows, each with left and right vertices.
+    // UV.y goes from 1.0 at the bottom to 0.0 at the top.
+
+    // Widen the mesh to fix texture distortion and prevent sub-pixel tips
+    // The geometry should be wider than the visible grass content - rely on alpha texture for sharp edges
+    const float baseWidth = 0.12f;   // Wider base (was 0.06) to match texture aspect ratio
+    const float tipWidth = 0.06f;    // Wider tip (was 0.015) to prevent sub-pixel shimmering
+
+    Vertex vertices[kGrassVertexCount];
+
+    for (int row = 0; row < kGrassRows; ++row) {
+        float t = static_cast<float>(row) / static_cast<float>(kGrassSegments); // 0 bottom -> 1 top
+
+        // Non-linear taper: emphasize thinning near the tip
+        float width = baseWidth + (tipWidth - baseWidth) * (t * t); // quadratic taper
+        float halfWidth = width;
+
+        float y = -0.5f + t * 1.0f;        // -0.5 .. +0.5
+        float uvY = 1.0f - t;              // 1 at bottom, 0 at top
+
+        // Left vertex
+        int leftIndex = row * kGrassVertsPerRow + 0;
+        vertices[leftIndex].position = { -halfWidth, y, 0.0f };
+        vertices[leftIndex].normal   = { 0.0f, 1.0f, 0.0f };
+        vertices[leftIndex].texcoord = { 0.0f, uvY };
+
+        // Right vertex
+        int rightIndex = row * kGrassVertsPerRow + 1;
+        vertices[rightIndex].position = { halfWidth, y, 0.0f };
+        vertices[rightIndex].normal   = { 0.0f, 1.0f, 0.0f };
+        vertices[rightIndex].texcoord = { 1.0f, uvY };
+    }
+
     // Create m_vertexBuffer using device->newBuffer with the data size and MTL::ResourceStorageModeShared
     size_t vertexDataSize = sizeof(vertices);
     m_vertexBuffer = m_device->newBuffer(vertexDataSize, MTL::ResourceStorageModeShared);
@@ -398,11 +483,29 @@ void Renderer::buildBuffers()
         return;
     }
     
-    // Create index buffer for the quad (indices: 0, 1, 2, 1, 3, 2)
-    uint16_t indices[6] = {
-        0, 1, 2,  // First triangle: Bottom-Left, Bottom-Right, Top-Left
-        1, 3, 2   // Second triangle: Bottom-Right, Top-Right, Top-Left
-    };
+    // Create index buffer for the strip: each vertical segment becomes 2 triangles.
+    // Row r has vertices (Lr, Rr) = (2r, 2r+1)
+    // Row r+1 has (Lr1, Rr1) = (2(r+1), 2(r+1)+1)
+    // Triangles: (Lr, Rr, Lr1) and (Rr, Rr1, Lr1)
+    uint16_t indices[kGrassIndexCount];
+
+    int idx = 0;
+    for (int seg = 0; seg < kGrassSegments; ++seg) {
+        uint16_t Lr  = static_cast<uint16_t>(seg * kGrassVertsPerRow + 0);
+        uint16_t Rr  = static_cast<uint16_t>(seg * kGrassVertsPerRow + 1);
+        uint16_t Lr1 = static_cast<uint16_t>((seg + 1) * kGrassVertsPerRow + 0);
+        uint16_t Rr1 = static_cast<uint16_t>((seg + 1) * kGrassVertsPerRow + 1);
+
+        // First triangle
+        indices[idx++] = Lr;
+        indices[idx++] = Rr;
+        indices[idx++] = Lr1;
+
+        // Second triangle
+        indices[idx++] = Rr;
+        indices[idx++] = Rr1;
+        indices[idx++] = Lr1;
+    }
     
     size_t indexDataSize = sizeof(indices);
     m_indexBuffer = m_device->newBuffer(indexDataSize, MTL::ResourceStorageModeShared);
@@ -485,33 +588,68 @@ void Renderer::buildInstanceBuffer()
 
 void Renderer::resize(int width, int height)
 {
-    // Release old depth texture
+    // Update metal layer drawable size
+    m_metalLayer->setDrawableSize(CGSizeMake(static_cast<CGFloat>(width), static_cast<CGFloat>(height)));
+    
+    // Release old textures
     if (m_depthTexture) {
         m_depthTexture->release();
         m_depthTexture = nullptr;
     }
+    if (m_msaaColorTexture) {
+        m_msaaColorTexture->release();
+        m_msaaColorTexture = nullptr;
+    }
+    if (m_msaaDepthTexture) {
+        m_msaaDepthTexture->release();
+        m_msaaDepthTexture = nullptr;
+    }
     
-    // Create a new MTL::TextureDescriptor with MTLPixelFormatDepth32Float
+    // Create MSAA Color Texture (4x multisample)
+    MTL::TextureDescriptor* msaaColorDescriptor = MTL::TextureDescriptor::alloc()->init();
+    msaaColorDescriptor->setWidth(width);
+    msaaColorDescriptor->setHeight(height);
+    msaaColorDescriptor->setPixelFormat(MTL::PixelFormatBGRA8Unorm);
+    msaaColorDescriptor->setTextureType(MTL::TextureType2DMultisample);
+    msaaColorDescriptor->setSampleCount(4);
+    msaaColorDescriptor->setUsage(MTL::TextureUsageRenderTarget);
+    msaaColorDescriptor->setStorageMode(MTL::StorageModePrivate);
+    
+    m_msaaColorTexture = m_device->newTexture(msaaColorDescriptor);
+    if (!m_msaaColorTexture) {
+        std::cerr << "Failed to create MSAA color texture" << std::endl;
+    }
+    msaaColorDescriptor->release();
+    
+    // Create MSAA Depth Texture (4x multisample)
+    MTL::TextureDescriptor* msaaDepthDescriptor = MTL::TextureDescriptor::alloc()->init();
+    msaaDepthDescriptor->setWidth(width);
+    msaaDepthDescriptor->setHeight(height);
+    msaaDepthDescriptor->setPixelFormat(MTL::PixelFormatDepth32Float);
+    msaaDepthDescriptor->setTextureType(MTL::TextureType2DMultisample);
+    msaaDepthDescriptor->setSampleCount(4);
+    msaaDepthDescriptor->setUsage(MTL::TextureUsageRenderTarget);
+    msaaDepthDescriptor->setStorageMode(MTL::StorageModePrivate);
+    
+    m_msaaDepthTexture = m_device->newTexture(msaaDepthDescriptor);
+    if (!m_msaaDepthTexture) {
+        std::cerr << "Failed to create MSAA depth texture" << std::endl;
+    }
+    msaaDepthDescriptor->release();
+    
+    // Create resolve Depth Texture (non-multisample, for resolve target)
     MTL::TextureDescriptor* depthDescriptor = MTL::TextureDescriptor::alloc()->init();
     depthDescriptor->setWidth(width);
     depthDescriptor->setHeight(height);
     depthDescriptor->setPixelFormat(MTL::PixelFormatDepth32Float);
     depthDescriptor->setTextureType(MTL::TextureType2D);
-    
-    // Usage should be RenderTarget
     depthDescriptor->setUsage(MTL::TextureUsageRenderTarget);
-    
-    // StorageMode should be Private (GPU only)
     depthDescriptor->setStorageMode(MTL::StorageModePrivate);
     
-    // Create m_depthTexture
     m_depthTexture = m_device->newTexture(depthDescriptor);
-    
     if (!m_depthTexture) {
         std::cerr << "Failed to create depth texture" << std::endl;
     }
-    
-    // Release descriptor
     depthDescriptor->release();
 }
 
@@ -520,7 +658,7 @@ void Renderer::buildTextures()
     // Create m_texture instance (grass)
     // Note: Make sure to check path. Since we copy assets to bin, relative path "assets/grass_albedo.png" should work.
     try {
-        m_texture = new Texture(m_device, "assets/grass_albedo.png");
+        m_texture = new Texture(m_device, m_commandQueue, "assets/grass_albedo.png");
         std::cout << "Successfully loaded grass texture" << std::endl;
     } catch (const std::exception& e) {
         std::cerr << "Failed to load grass texture: " << e.what() << std::endl;
@@ -530,12 +668,12 @@ void Renderer::buildTextures()
     // Create m_groundTexture instance (ground)
     // Try PNG first, then JPG as fallback
     try {
-        m_groundTexture = new Texture(m_device, "assets/ground_albedo.png");
+        m_groundTexture = new Texture(m_device, m_commandQueue, "assets/ground_albedo.png");
         std::cout << "Successfully loaded ground texture (PNG)" << std::endl;
     } catch (const std::exception& e) {
         std::cerr << "Failed to load ground texture (PNG): " << e.what() << std::endl;
         try {
-            m_groundTexture = new Texture(m_device, "assets/ground_albedo.jpg");
+            m_groundTexture = new Texture(m_device, m_commandQueue, "assets/ground_albedo.jpg");
             std::cout << "Successfully loaded ground texture (JPG)" << std::endl;
         } catch (const std::exception& e2) {
             std::cerr << "Failed to load ground texture (JPG): " << e2.what() << std::endl;

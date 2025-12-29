@@ -28,6 +28,11 @@ void* GetMetalLayerFromGLFW(void* glfwWindow) {
     // Set the layer's pixelFormat to MTLPixelFormatBGRA8Unorm
     [layer setPixelFormat:MTLPixelFormatBGRA8Unorm];
     
+    // Enable 4x MSAA on the Metal layer
+    [layer setDrawableSize:[view bounds].size];
+    // Note: CAMetalLayer doesn't have a direct sampleCount property
+    // MSAA is handled through render pipeline and textures
+    
     // Set view.layer = layer and view.wantsLayer = YES
     [view setLayer:layer];
     [view setWantsLayer:YES];

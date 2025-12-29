@@ -28,7 +28,9 @@ private:
     MTL::Buffer* m_uniformBuffer;    // 存放uniform数据
     MTL::Buffer* m_groundVertexBuffer; // 存放地面顶点数据
     MTL::DepthStencilState* m_depthStencilState;
-    MTL::Texture* m_depthTexture;    // 深度纹理
+    MTL::Texture* m_depthTexture;    // 深度纹理 (resolve target)
+    MTL::Texture* m_msaaColorTexture; // MSAA color render target
+    MTL::Texture* m_msaaDepthTexture; // MSAA depth render target
     Texture* m_texture;               // 纹理 (grass)
     Texture* m_groundTexture;         // 地面纹理
     Camera* m_camera;                 // 相机

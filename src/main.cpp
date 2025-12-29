@@ -51,6 +51,16 @@ int main() {
     
     Renderer* renderer = new Renderer(device, metalLayer);
     
+    // Set up resize callback to update MSAA textures when window is resized
+    glfwSetFramebufferSizeCallback(window, [](GLFWwindow* win, int width, int height) {
+        // Get renderer from window user pointer (we'll set it below)
+        Renderer* r = static_cast<Renderer*>(glfwGetWindowUserPointer(win));
+        if (r) {
+            r->resize(width, height);
+        }
+    });
+    glfwSetWindowUserPointer(window, renderer);
+    
     // Initialize timing
     auto lastTime = std::chrono::high_resolution_clock::now();
     

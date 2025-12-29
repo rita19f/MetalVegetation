@@ -4,7 +4,7 @@
 
 class Texture {
 public:
-    Texture(MTL::Device* device, const std::string& filepath);
+    Texture(MTL::Device* device, MTL::CommandQueue* commandQueue, const std::string& filepath);
     ~Texture();
 
     MTL::Texture* getMetalTexture() const { return m_texture; }

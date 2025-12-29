@@ -42,4 +42,5 @@ struct Uniforms {
     float3 lightDirection; // 光源方向
     float3 lightColor; // 光源颜色
     float time; // 时间，用于风吹草动
+    float3 cameraPosition; // 相机位置，用于圆柱形广告牌
 };
