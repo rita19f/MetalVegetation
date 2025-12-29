@@ -44,6 +44,14 @@ fragment float4 groundFragmentMain(
     // Sample the texture color
     float4 textureColor = colorTexture.sample(textureSampler, in.texcoord);
     
+    // ============================================================================
+    // 1. Tint Ground Green (Fake Integration with Grass)
+    // ============================================================================
+    // Blend dirt texture with dark green to create mossy forest floor look
+    // This hides the intersection where grass blades touch the ground
+    float3 darkGreen = float3(0.1, 0.25, 0.1); // Dark green tint
+    float3 tintedColor = mix(textureColor.rgb, darkGreen, 0.8); // 80% green, 20% texture
+    
     // Basic lighting: diffuse (dot product of normal & lightDirection) + ambient
     float3 normal = normalize(in.normal);
     float3 lightDir = normalize(uniforms.lightDirection);
@@ -57,8 +65,8 @@ fragment float4 groundFragmentMain(
     // Mix lighting
     float3 lighting = uniforms.lightColor * (NdotL + ambient);
     
-    // Apply lighting to texture color
-    float4 finalColor = float4(textureColor.rgb * lighting, textureColor.a);
+    // Apply lighting to tinted color
+    float4 finalColor = float4(tintedColor * lighting, textureColor.a);
     
     // No Alpha Discard (Ground is opaque)
     return finalColor;

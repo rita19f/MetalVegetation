@@ -8,11 +8,18 @@ struct RasterizerData {
     float4 position [[position]];
     float2 texcoord;
     float3 normal;
+    float3 worldPos; // World position for view direction calculation
+    float instanceHash; // Hash value from instanceID for color variation
 };
 
 // Pseudo-random function based on instance ID
 float random(float seed) {
     return fract(sin(seed * 12.9898) * 43758.5453);
+}
+
+// Hash function for instanceID (returns 0.0 to 1.0)
+float hash(uint instanceID) {
+    return random(float(instanceID) * 0.12345 + 500.0);
 }
 
 // Struct to hold instance variation data
@@ -25,8 +32,6 @@ struct InstanceVariation {
 InstanceVariation getInstanceVariation(uint instanceID) {
     float rand1 = random(float(instanceID));
     float rand2 = random(float(instanceID) * 0.5 + 100.0);
-    float rand3 = random(float(instanceID) * 0.3 + 200.0); // For bend direction
-    float rand4 = random(float(instanceID) * 0.7 + 300.0); // For initial tilt
     
     InstanceVariation variation;
     // Random rotation: 0 to 360 degrees
@@ -34,9 +39,6 @@ InstanceVariation getInstanceVariation(uint instanceID) {
     
     // Random scale: 0.8 to 1.2
     variation.scale = 0.8 + rand2 * 0.4;
-    
-    // Store additional random values for bend direction and tilt
-    // We'll use rand3 and rand4 in the vertex shader directly
     
     return variation;
 }
@@ -117,9 +119,6 @@ vertex RasterizerData vertexMain(
     float3 vertexPosition = vertices[vertexID].position;
     float2 texcoord = vertices[vertexID].texcoord;
     
-    // Normalize Y coordinate: -0.5 (bottom) to 0.5 (top) -> 0.0 (bottom) to 1.0 (top)
-    float normalizedY = (vertexPosition.y + 0.5) / 1.0; // Maps -0.5..0.5 to 0..1
-    
     // ============================================================================
     // 3. Random Initial Tilt: Real grass doesn't grow straight up
     // ============================================================================
@@ -184,21 +183,31 @@ vertex RasterizerData vertexMain(
     float4 pos = uniforms.projectionMatrix * uniforms.viewMatrix * float4(worldPos, 1.0);
     
     // ============================================================================
-    // 3. Soften normals: blend up vector with bend direction
+    // 3. Hybrid Normals: Forward-Up blend for directional shading
     // ============================================================================
-    float3 softNormal = normalize(float3(0.0, 1.0, 0.0) + bendDirection * 0.3);
+    // Calculate forward normal (the direction the blade face is looking)
+    // The blade faces forward in local space (0, 0, 1), rotated by billboard rotation
+    float3 forwardLocal = float3(0.0, 0.0, 1.0); // Forward direction in local space
+    float3 forwardNormal = (billboardRotation * float4(forwardLocal, 0.0)).xyz;
+    
+    // Mix forward direction (50%) with up direction (80%) for stylized normal
+    // This keeps softness but adds enough directional shading so blades catch light
+    float3 stylizedNormal = normalize(forwardNormal * 0.5 + float3(0.0, 1.0, 0.0) * 0.8);
     
     // Output position and attributes
     out.position = pos;
     out.texcoord = texcoord;
-    out.normal = softNormal;
+    out.normal = stylizedNormal; // Use hybrid forward-up normal for directional shading
+    out.worldPos = worldPos; // Pass world position for view direction calculation
+    out.instanceHash = hash(instanceID); // Pass instance hash for color variation
     
     return out;
 }
 
 fragment float4 fragmentMain(
     RasterizerData in [[stage_in]],
-    texture2d<float> colorTexture [[texture(0)]]
+    texture2d<float> colorTexture [[texture(0)]],
+    constant Uniforms &uniforms [[buffer(BufferIndexUniforms)]]
 ) {
     // Define a constexpr sampler inside the shader function
     constexpr sampler textureSampler(mag_filter::linear, min_filter::linear);
@@ -235,8 +244,73 @@ fragment float4 fragmentMain(
     // in.texcoord.y: 0 = top of grass, 1 = bottom of grass
     // We want dark at bottom (y=1) and light at top (y=0), so use (1.0 - in.texcoord.y)
     float gradientFactor = 1.0 - in.texcoord.y;
-    float3 proceduralColor = mix(darkGreen, lightGreen, gradientFactor);
+    float3 baseColor = mix(darkGreen, lightGreen, gradientFactor);
     
-    // Return procedural color with smoothed opacity for Alpha-to-Coverage
-    return float4(proceduralColor, opacity);
+    // ============================================================================
+    // 3. Per-Instance Color Variation: Break visual repetition (Boosted)
+    // ============================================================================
+    // Use instance hash for per-blade distinctness (passed from vertex shader)
+    float noise = in.instanceHash; // Returns 0.0 to 1.0
+    
+    // Create distinct dry/straw color (yellowish)
+    float3 dryColor = float3(0.8, 0.7, 0.4); // Yellowish/Straw color
+    
+    // Mix base color with dry color - up to 70% dry for maximum variation visibility
+    float3 variedColor = mix(baseColor, dryColor, noise * 0.7); // Max 70% variation
+    
+    // ============================================================================
+    // 4. Half-Lambert Diffuse + Translucency (Ghibli-style lighting)
+    // ============================================================================
+    float3 normal = normalize(in.normal);
+    float3 sunDir = normalize(uniforms.sunDirection);
+    
+    // Half-Lambert: wraps light around, simulating translucency
+    float NdotL = dot(normal, sunDir);
+    float halfLambert = NdotL * 0.5 + 0.5; // Maps -1..1 to 0..1
+    
+    // Ambient light
+    float ambient = 0.3;
+    
+    // Combine diffuse lighting
+    float3 lighting = uniforms.sunColor * (halfLambert + ambient);
+    
+    // ============================================================================
+    // 5. Specular Highlight (Waxy look, mainly near tips)
+    // ============================================================================
+    // Calculate view direction
+    float3 viewDir = normalize(uniforms.cameraPosition - in.worldPos);
+    
+    // Blinn-Phong half vector
+    float3 halfDir = normalize(sunDir + viewDir);
+    
+    // Specular calculation
+    float specularStrength = 0.15; // Subtle specular
+    float specularPower = 64.0; // Crisp, tight highlight (increased from 32.0 for sharper shine)
+    float spec = pow(max(0.0, dot(normal, halfDir)), specularPower) * specularStrength;
+    
+    // Make specular stronger near tips (where UV.y is closer to 0)
+    float tipFactor = 1.0 - in.texcoord.y; // 0 at bottom, 1 at top
+    spec *= tipFactor; // Specular is stronger at tips
+    
+    // Add specular to lighting
+    float3 specularLight = uniforms.sunColor * spec;
+    
+    // ============================================================================
+    // 6. Final Color Composition
+    // ============================================================================
+    // FinalColor = (GradientColor * RandomVariation) * (HalfLambert + Ambient) + Specular
+    float3 finalColor = variedColor * lighting + specularLight;
+    
+    // ============================================================================
+    // 7. Stronger Ambient Occlusion (AO) at Roots
+    // ============================================================================
+    // Strictly enforce darker roots to blend with dark green ground
+    // Bottom 40% gets progressively darker (in.texcoord.y: 1 = bottom, 0 = top)
+    float ao = smoothstep(0.0, 0.4, in.texcoord.y); // 1.0 at bottom, 0.0 at top 40%
+    
+    // Apply AO: roots are shadow-dark (0.3), tips are bright (1.0)
+    finalColor *= (0.3 + 0.7 * ao);
+    
+    // Return final color with smoothed opacity for Alpha-to-Coverage
+    return float4(finalColor, opacity);
 }

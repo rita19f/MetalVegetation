@@ -39,8 +39,10 @@ struct InstanceData {
 struct Uniforms {
     float4x4 viewMatrix;
     float4x4 projectionMatrix;
-    float3 lightDirection; // 光源方向
-    float3 lightColor; // 光源颜色
+    float3 lightDirection; // 光源方向 (legacy, kept for compatibility)
+    float3 lightColor; // 光源颜色 (legacy, kept for compatibility)
     float time; // 时间，用于风吹草动
     float3 cameraPosition; // 相机位置，用于圆柱形广告牌
+    float3 sunDirection; // 太阳方向，用于光照计算
+    float3 sunColor; // 太阳颜色
 };

@@ -207,6 +207,12 @@ void Renderer::draw()
         // Set uniforms.lightColor. Use simd::make_float3(1.0f, 1.0f, 0.9f) (Warm sunlight)
         uniforms.lightColor = simd::make_float3(1.0f, 1.0f, 0.9f);
         
+        // Set uniforms.sunDirection for stylized foliage lighting (normalize(1.0, 1.0, 0.5))
+        uniforms.sunDirection = simd::normalize(simd::make_float3(1.0f, 1.0f, 0.5f));
+        
+        // Set uniforms.sunColor (bright warm sunlight)
+        uniforms.sunColor = simd::make_float3(1.0f, 0.95f, 0.85f);
+        
         // Set uniforms.cameraPosition for cylindrical billboarding
         glm::vec3 camPos = m_camera->position;
         uniforms.cameraPosition = simd::make_float3(camPos.x, camPos.y, camPos.z);
@@ -440,10 +446,11 @@ void Renderer::buildBuffers()
     // We generate kGrassRows rows, each with left and right vertices.
     // UV.y goes from 1.0 at the bottom to 0.0 at the top.
 
-    // Widen the mesh to fix texture distortion and prevent sub-pixel tips
-    // The geometry should be wider than the visible grass content - rely on alpha texture for sharp edges
-    const float baseWidth = 0.12f;   // Wider base (was 0.06) to match texture aspect ratio
-    const float tipWidth = 0.06f;    // Wider tip (was 0.015) to prevent sub-pixel shimmering
+    // Adjust proportions for chunky & cute look (shorter and wider)
+    // Increase width significantly and reduce height by 30% to avoid "tall and thin" ribbon look
+    const float baseWidth = 0.2f;    // Much wider base (was 0.12) for chunkier look
+    const float tipWidth = 0.08f;    // Wider tip (was 0.06) to maintain proportion
+    const float heightScale = 0.7f;  // Reduce height by 30% (0.7 = 70% of original)
 
     Vertex vertices[kGrassVertexCount];
 
@@ -454,7 +461,8 @@ void Renderer::buildBuffers()
         float width = baseWidth + (tipWidth - baseWidth) * (t * t); // quadratic taper
         float halfWidth = width;
 
-        float y = -0.5f + t * 1.0f;        // -0.5 .. +0.5
+        // Reduced height: -0.35 .. +0.35 (30% shorter than original -0.5 .. +0.5)
+        float y = (-0.5f + t * 1.0f) * heightScale;  // Apply height reduction
         float uvY = 1.0f - t;              // 1 at bottom, 0 at top
 
         // Left vertex
