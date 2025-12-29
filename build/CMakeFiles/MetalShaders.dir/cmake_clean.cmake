@@ -1,5 +1,6 @@
 file(REMOVE_RECURSE
   "CMakeFiles/MetalShaders"
+  "GroundShaders.air"
   "Shaders.air"
   "default.metallib"
 )

@@ -6,7 +6,6 @@ using namespace metal;
 // 定义顶点着色器的输出（光栅化插值数据）
 struct RasterizerData {
     float4 position [[position]];
-    float4 color;
     float2 texcoord;
 };
 
@@ -24,7 +23,6 @@ vertex RasterizerData vertexMain(
     
     // 读取当前顶点的属性
     float3 vertexPosition = vertices[vertexID].position;
-    float3 color = vertices[vertexID].color;
     float2 texcoord = vertices[vertexID].texcoord;
     
     // Convert position to float4 for matrix multiplication
@@ -47,7 +45,6 @@ vertex RasterizerData vertexMain(
     
     // Output position
     out.position = pos;
-    out.color = vector_float4(color, 1.0);
     out.texcoord = texcoord;
     
     return out;

@@ -38,19 +38,13 @@ fragment float4 groundFragmentMain(
     texture2d<float> colorTexture [[texture(0)]],
     constant Uniforms &uniforms [[buffer(BufferIndexUniforms)]]
 ) {
-    // Define a constexpr sampler with repeat address mode
+    // Define a constexpr sampler with repeat address mode (Crucial for tiling)
     constexpr sampler textureSampler(mag_filter::linear, min_filter::linear, address::repeat);
     
-    // Simple texture sampling
+    // Sample the texture color
     float4 textureColor = colorTexture.sample(textureSampler, in.texcoord);
     
-    // DEBUG: If ground texture is black, show Green to indicate load failure
-    if (textureColor.r == 0.0 && textureColor.g == 0.0 && textureColor.b == 0.0) {
-        return float4(0.0, 1.0, 0.0, 1.0); // Bright Green = Ground texture is black
-    }
-    
-    // Basic lighting (Dot product with light direction) matching the grass lighting logic
-    // Normalize the input normal and light direction
+    // Basic lighting: diffuse (dot product of normal & lightDirection) + ambient
     float3 normal = normalize(in.normal);
     float3 lightDir = normalize(uniforms.lightDirection);
     

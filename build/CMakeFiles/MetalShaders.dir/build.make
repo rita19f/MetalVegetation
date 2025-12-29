@@ -69,18 +69,25 @@ include CMakeFiles/MetalShaders.dir/progress.make
 CMakeFiles/MetalShaders: default.metallib
 
 default.metallib: Shaders.air
+default.metallib: GroundShaders.air
 	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --blue --bold --progress-dir=/Users/yuyuan/MetalVegetation/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_1) "Linking Metal shader library"
-	xcrun -sdk macosx metallib /Users/yuyuan/MetalVegetation/build/Shaders.air -o /Users/yuyuan/MetalVegetation/build/default.metallib
+	xcrun -sdk macosx metallib /Users/yuyuan/MetalVegetation/build/Shaders.air /Users/yuyuan/MetalVegetation/build/GroundShaders.air -o /Users/yuyuan/MetalVegetation/build/default.metallib
+
+GroundShaders.air: /Users/yuyuan/MetalVegetation/src/GroundShaders.metal
+GroundShaders.air: /Users/yuyuan/MetalVegetation/src/ShaderTypes.h
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --blue --bold --progress-dir=/Users/yuyuan/MetalVegetation/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_2) "Compiling Ground Metal shader to AIR"
+	xcrun -sdk macosx metal -c /Users/yuyuan/MetalVegetation/src/GroundShaders.metal -o /Users/yuyuan/MetalVegetation/build/GroundShaders.air -I/Users/yuyuan/MetalVegetation/src
 
 Shaders.air: /Users/yuyuan/MetalVegetation/src/Shaders.metal
 Shaders.air: /Users/yuyuan/MetalVegetation/src/ShaderTypes.h
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --blue --bold --progress-dir=/Users/yuyuan/MetalVegetation/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_2) "Compiling Metal shader to AIR"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --blue --bold --progress-dir=/Users/yuyuan/MetalVegetation/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_3) "Compiling Grass Metal shader to AIR"
 	xcrun -sdk macosx metal -c /Users/yuyuan/MetalVegetation/src/Shaders.metal -o /Users/yuyuan/MetalVegetation/build/Shaders.air -I/Users/yuyuan/MetalVegetation/src
 
 CMakeFiles/MetalShaders.dir/codegen:
 .PHONY : CMakeFiles/MetalShaders.dir/codegen
 
 MetalShaders: CMakeFiles/MetalShaders
+MetalShaders: GroundShaders.air
 MetalShaders: Shaders.air
 MetalShaders: default.metallib
 MetalShaders: CMakeFiles/MetalShaders.dir/build.make

@@ -122,23 +122,33 @@ if(APPLE)
     endif()
     
     # Compile Metal shaders
-    set(METAL_SHADER_SOURCE ${CMAKE_SOURCE_DIR}/src/Shaders.metal)
-    set(METAL_SHADER_IR ${CMAKE_BINARY_DIR}/Shaders.air)
+    set(METAL_SHADER_SOURCE_GRASS ${CMAKE_SOURCE_DIR}/src/Shaders.metal)
+    set(METAL_SHADER_SOURCE_GROUND ${CMAKE_SOURCE_DIR}/src/GroundShaders.metal)
+    set(METAL_SHADER_IR_GRASS ${CMAKE_BINARY_DIR}/Shaders.air)
+    set(METAL_SHADER_IR_GROUND ${CMAKE_BINARY_DIR}/GroundShaders.air)
     set(METAL_SHADER_LIB ${CMAKE_BINARY_DIR}/default.metallib)
     
-    # Compile Metal shader to AIR (Apple Intermediate Representation)
+    # Compile Grass Metal shader to AIR (Apple Intermediate Representation)
     add_custom_command(
-        OUTPUT ${METAL_SHADER_IR}
-        COMMAND xcrun -sdk macosx metal -c ${METAL_SHADER_SOURCE} -o ${METAL_SHADER_IR} -I${CMAKE_SOURCE_DIR}/src
-        DEPENDS ${METAL_SHADER_SOURCE} ${CMAKE_SOURCE_DIR}/src/ShaderTypes.h
-        COMMENT "Compiling Metal shader to AIR"
+        OUTPUT ${METAL_SHADER_IR_GRASS}
+        COMMAND xcrun -sdk macosx metal -c ${METAL_SHADER_SOURCE_GRASS} -o ${METAL_SHADER_IR_GRASS} -I${CMAKE_SOURCE_DIR}/src
+        DEPENDS ${METAL_SHADER_SOURCE_GRASS} ${CMAKE_SOURCE_DIR}/src/ShaderTypes.h
+        COMMENT "Compiling Grass Metal shader to AIR"
     )
     
-    # Link AIR to metallib
+    # Compile Ground Metal shader to AIR (Apple Intermediate Representation)
+    add_custom_command(
+        OUTPUT ${METAL_SHADER_IR_GROUND}
+        COMMAND xcrun -sdk macosx metal -c ${METAL_SHADER_SOURCE_GROUND} -o ${METAL_SHADER_IR_GROUND} -I${CMAKE_SOURCE_DIR}/src
+        DEPENDS ${METAL_SHADER_SOURCE_GROUND} ${CMAKE_SOURCE_DIR}/src/ShaderTypes.h
+        COMMENT "Compiling Ground Metal shader to AIR"
+    )
+    
+    # Link AIR files to metallib
     add_custom_command(
         OUTPUT ${METAL_SHADER_LIB}
-        COMMAND xcrun -sdk macosx metallib ${METAL_SHADER_IR} -o ${METAL_SHADER_LIB}
-        DEPENDS ${METAL_SHADER_IR}
+        COMMAND xcrun -sdk macosx metallib ${METAL_SHADER_IR_GRASS} ${METAL_SHADER_IR_GROUND} -o ${METAL_SHADER_LIB}
+        DEPENDS ${METAL_SHADER_IR_GRASS} ${METAL_SHADER_IR_GROUND}
         COMMENT "Linking Metal shader library"
     )
     

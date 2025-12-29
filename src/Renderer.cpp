@@ -30,13 +30,16 @@ Renderer::Renderer(MTL::Device* device, CA::MetalLayer* layer)
     , m_metalLayer(layer)
     , m_commandQueue(nullptr)
     , m_pso(nullptr)
+    , m_groundPSO(nullptr)
     , m_vertexBuffer(nullptr)
     , m_indexBuffer(nullptr)
     , m_instanceBuffer(nullptr)
     , m_uniformBuffer(nullptr)
+    , m_groundVertexBuffer(nullptr)
     , m_depthStencilState(nullptr)
     , m_depthTexture(nullptr)
     , m_texture(nullptr)
+    , m_groundTexture(nullptr)
     , m_camera(nullptr)
     , m_firstMouse(true)
     , m_lastX(400.0f)
@@ -53,6 +56,7 @@ Renderer::Renderer(MTL::Device* device, CA::MetalLayer* layer)
     buildBuffers();
     buildInstanceBuffer();
     buildTextures();
+    buildGround();
 }
 
 Renderer::~Renderer()
@@ -87,6 +91,15 @@ Renderer::~Renderer()
     }
     if (m_uniformBuffer) {
         m_uniformBuffer->release();
+    }
+    if (m_groundPSO) {
+        m_groundPSO->release();
+    }
+    if (m_groundVertexBuffer) {
+        m_groundVertexBuffer->release();
+    }
+    if (m_groundTexture) {
+        delete m_groundTexture;
     }
 }
 
@@ -164,25 +177,49 @@ void Renderer::draw()
     // Create a RenderCommandEncoder
     MTL::RenderCommandEncoder* renderEncoder = commandBuffer->renderCommandEncoder(renderPassDescriptor);
     
-    // Set render pipeline state
-    renderEncoder->setRenderPipelineState(m_pso);
-    
-    // Set depth stencil state
+    // Set depth stencil state (shared for both passes)
     renderEncoder->setDepthStencilState(m_depthStencilState);
     
-    // Set vertex buffer
+    //  Pass 1: Ground
+
+    if (m_groundPSO && m_groundVertexBuffer && m_groundTexture && m_groundTexture->getMetalTexture()) {
+        // Explicit Binding: Set the correct PSO
+        renderEncoder->setRenderPipelineState(m_groundPSO);
+        
+        // Explicit Binding: Bind the ground vertex buffer
+        renderEncoder->setVertexBuffer(m_groundVertexBuffer, 0, BufferIndexMeshPositions);
+        
+        // Explicit Binding: Bind the uniform buffer (for both vertex and fragment shaders)
+        renderEncoder->setVertexBuffer(m_uniformBuffer, 0, BufferIndexUniforms);
+        renderEncoder->setFragmentBuffer(m_uniformBuffer, 0, BufferIndexUniforms);
+        
+        // Explicit Binding: Bind the ground texture
+        renderEncoder->setFragmentTexture(m_groundTexture->getMetalTexture(), 0);
+        
+        // Draw the ground (6 vertices = 2 triangles)
+        renderEncoder->drawPrimitives(MTL::PrimitiveTypeTriangle, NS::UInteger(0), NS::UInteger(6));
+    } else {
+        std::cerr << "Warning: Ground rendering skipped - missing resources" << std::endl;
+    }
+    
+    // Pass 2: Grass
+    
+    // Explicit Binding: Set the correct PSO
+    renderEncoder->setRenderPipelineState(m_pso);
+    
+    // Explicit Binding: Re-bind Vertex Buffer
     renderEncoder->setVertexBuffer(m_vertexBuffer, 0, BufferIndexMeshPositions);
     
-    // Set instance buffer
+    // Explicit Binding: Bind Instance Buffer
     renderEncoder->setVertexBuffer(m_instanceBuffer, 0, BufferIndexInstanceData);
     
-    // Bind the uniform buffer: encoder->setVertexBuffer(m_uniformBuffer, 0, BufferIndexUniforms)
+    // Explicit Binding: Bind Uniform Buffer
     renderEncoder->setVertexBuffer(m_uniformBuffer, 0, BufferIndexUniforms);
     
-    // Set fragment texture (CRITICAL FIX)
+    // Explicit Binding: Bind Grass Texture
     renderEncoder->setFragmentTexture(m_texture->getMetalTexture(), 0);
     
-    // Set index buffer and draw indexed primitives with instancing
+    // Draw Instanced Grass
     renderEncoder->drawIndexedPrimitives(MTL::PrimitiveTypeTriangle, NS::UInteger(6), MTL::IndexTypeUInt16, m_indexBuffer, NS::UInteger(0), NS::UInteger(10000));
     
     // End encoding
@@ -252,13 +289,65 @@ void Renderer::buildShaders()
         }
     }
     
-    // Release resources
+    // Release resources (keep library for ground shaders)
     vertexFunction->release();
     fragmentFunction->release();
-    library->release();
-    pipelineDescriptor->release();
     vertexFunctionName->release();
     fragmentFunctionName->release();
+    
+    // Load Ground Shaders
+    NS::String* groundVertexFunctionName = NS::String::string("groundVertexMain", NS::ASCIIStringEncoding);
+    NS::String* groundFragmentFunctionName = NS::String::string("groundFragmentMain", NS::ASCIIStringEncoding);
+    
+    MTL::Function* groundVertexFunction = library->newFunction(groundVertexFunctionName);
+    MTL::Function* groundFragmentFunction = library->newFunction(groundFragmentFunctionName);
+    
+    if (!groundVertexFunction || !groundFragmentFunction) {
+        std::cerr << "Failed to load ground shader functions" << std::endl;
+        if (groundVertexFunction) groundVertexFunction->release();
+        if (groundFragmentFunction) groundFragmentFunction->release();
+        groundVertexFunctionName->release();
+        groundFragmentFunctionName->release();
+        library->release();
+        pipelineDescriptor->release();
+        return;
+    }
+    
+    // Create ground pipeline descriptor
+    MTL::RenderPipelineDescriptor* groundPipelineDescriptor = MTL::RenderPipelineDescriptor::alloc()->init();
+    groundPipelineDescriptor->setVertexFunction(groundVertexFunction);
+    groundPipelineDescriptor->setFragmentFunction(groundFragmentFunction);
+    
+    // Set color attachment pixel format
+    MTL::RenderPipelineColorAttachmentDescriptor* groundColorAttachment = groundPipelineDescriptor->colorAttachments()->object(0);
+    groundColorAttachment->setPixelFormat(MTL::PixelFormatBGRA8Unorm);
+    
+    // Set depth pixel format
+    groundPipelineDescriptor->setDepthAttachmentPixelFormat(MTL::PixelFormatDepth32Float);
+    
+    // Create m_groundPSO
+    m_groundPSO = m_device->newRenderPipelineState(groundPipelineDescriptor, &error);
+    
+    if (!m_groundPSO) {
+        if (error) {
+            NS::String* errorString = error->localizedDescription();
+            std::cerr << "Failed to create ground render pipeline state: " << errorString->utf8String() << std::endl;
+            errorString->release();
+        } else {
+            std::cerr << "Failed to create ground render pipeline state" << std::endl;
+        }
+    }
+    
+    // Release ground shader resources
+    groundVertexFunction->release();
+    groundFragmentFunction->release();
+    groundPipelineDescriptor->release();
+    groundVertexFunctionName->release();
+    groundFragmentFunctionName->release();
+    
+    // Release library and pipeline descriptor
+    library->release();
+    pipelineDescriptor->release();
     
     // Create a MTL::DepthStencilDescriptor
     MTL::DepthStencilDescriptor* depthStencilDescriptor = MTL::DepthStencilDescriptor::alloc()->init();
@@ -290,10 +379,10 @@ void Renderer::buildBuffers()
     // Normal: Point normals straight UP (0, 1, 0) for all vertices
     // This makes grass look soft and evenly lit by the sun, avoiding black appearance when rotated away
     Vertex vertices[4] = {
-        { {-0.1f, -0.5f, 0.0f}, {1.0f, 1.0f, 1.0f}, {0.0f, 1.0f, 0.0f}, {0.0f, 1.0f} },  // Bottom-Left
-        { { 0.1f, -0.5f, 0.0f}, {1.0f, 1.0f, 1.0f}, {0.0f, 1.0f, 0.0f}, {1.0f, 1.0f} },  // Bottom-Right
-        { {-0.1f,  0.5f, 0.0f}, {1.0f, 1.0f, 1.0f}, {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f} },  // Top-Left
-        { { 0.1f,  0.5f, 0.0f}, {1.0f, 1.0f, 1.0f}, {0.0f, 1.0f, 0.0f}, {1.0f, 0.0f} }   // Top-Right
+        { {-0.1f, -0.5f, 0.0f}, {0.0f, 1.0f, 0.0f}, {0.0f, 1.0f} },  // Bottom-Left
+        { { 0.1f, -0.5f, 0.0f}, {0.0f, 1.0f, 0.0f}, {1.0f, 1.0f} },  // Bottom-Right
+        { {-0.1f,  0.5f, 0.0f}, {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f} },  // Top-Left
+        { { 0.1f,  0.5f, 0.0f}, {0.0f, 1.0f, 0.0f}, {1.0f, 0.0f} }   // Top-Right
     };
     
     // Create m_vertexBuffer using device->newBuffer with the data size and MTL::ResourceStorageModeShared
@@ -428,9 +517,65 @@ void Renderer::resize(int width, int height)
 
 void Renderer::buildTextures()
 {
-    // Create m_texture instance
+    // Create m_texture instance (grass)
     // Note: Make sure to check path. Since we copy assets to bin, relative path "assets/grass_albedo.png" should work.
-    m_texture = new Texture(m_device, "assets/grass_albedo.png");
+    try {
+        m_texture = new Texture(m_device, "assets/grass_albedo.png");
+        std::cout << "Successfully loaded grass texture" << std::endl;
+    } catch (const std::exception& e) {
+        std::cerr << "Failed to load grass texture: " << e.what() << std::endl;
+        m_texture = nullptr;
+    }
+    
+    // Create m_groundTexture instance (ground)
+    // Try PNG first, then JPG as fallback
+    try {
+        m_groundTexture = new Texture(m_device, "assets/ground_albedo.png");
+        std::cout << "Successfully loaded ground texture (PNG)" << std::endl;
+    } catch (const std::exception& e) {
+        std::cerr << "Failed to load ground texture (PNG): " << e.what() << std::endl;
+        try {
+            m_groundTexture = new Texture(m_device, "assets/ground_albedo.jpg");
+            std::cout << "Successfully loaded ground texture (JPG)" << std::endl;
+        } catch (const std::exception& e2) {
+            std::cerr << "Failed to load ground texture (JPG): " << e2.what() << std::endl;
+            m_groundTexture = nullptr;
+        }
+    }
+}
+
+void Renderer::buildGround()
+{
+    // Define vertices for a large quad (Plane) centered at (0,0,0)
+    // Size: 100.0f x 100.0f (From -50 to 50)
+    // Y-Position: -0.5f (Slightly below the grass roots so grass sticks into it)
+    // Normals: Point Straight Up (0, 1, 0)
+    // UVs: Scale them! Instead of 0..1, use 0..20.0f. This will tile the texture 20 times.
+    
+    // Use 6 vertices (2 triangles) directly to avoid managing a separate index buffer for the ground
+    Vertex groundVertices[6] = {
+        // First triangle
+        { {-50.0f, -0.5f, -50.0f}, {0.0f, 1.0f, 0.0f}, {0.0f, 20.0f} },   // Bottom-Left
+        { { 50.0f, -0.5f, -50.0f}, {0.0f, 1.0f, 0.0f}, {20.0f, 20.0f} },  // Bottom-Right
+        { {-50.0f, -0.5f,  50.0f}, {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f} },   // Top-Left
+        
+        // Second triangle
+        { { 50.0f, -0.5f, -50.0f}, {0.0f, 1.0f, 0.0f}, {20.0f, 20.0f} },  // Bottom-Right
+        { { 50.0f, -0.5f,  50.0f}, {0.0f, 1.0f, 0.0f}, {20.0f, 0.0f} },   // Top-Right
+        { {-50.0f, -0.5f,  50.0f}, {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f} }     // Top-Left
+    };
+    
+    // Create m_groundVertexBuffer with this data
+    size_t groundVertexDataSize = sizeof(groundVertices);
+    m_groundVertexBuffer = m_device->newBuffer(groundVertexDataSize, MTL::ResourceStorageModeShared);
+    
+    if (m_groundVertexBuffer) {
+        // Copy vertex data to buffer
+        void* bufferContents = m_groundVertexBuffer->contents();
+        memcpy(bufferContents, groundVertices, groundVertexDataSize);
+    } else {
+        std::cerr << "Failed to create ground vertex buffer" << std::endl;
+    }
 }
 
 void Renderer::update(GLFWwindow* window, float deltaTime)

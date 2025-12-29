@@ -1,11 +1,21 @@
 #pragma once
-#include <simd/simd.h>
+
+#ifdef __METAL_VERSION__
+    #include <metal_stdlib>
+    using namespace metal;
+    // Metal has built-in types: float2, float3, float4, float4x4
+#else
+    #include <simd/simd.h>
+    using float2 = simd::float2;
+    using float3 = simd::float3;
+    using float4 = simd::float4;
+    using float4x4 = simd::float4x4;
+#endif
 
 enum VertexAttributes {
     VertexAttributePosition = 0,
-    VertexAttributeColor    = 1,
-    VertexAttributeNormal   = 2, 
-    VertexAttributeTexcoord = 3  
+    VertexAttributeNormal   = 1, 
+    VertexAttributeTexcoord = 2  
 };
 
 enum BufferIndices {
@@ -14,23 +24,22 @@ enum BufferIndices {
     BufferIndexUniforms      = 2
 };
 
-// 顶点结构体
+// 顶点结构体 - Alignment safe between C++ and Metal
 struct Vertex {
-    simd::float3 position;
-    simd::float3 color;
-    simd::float3 normal;
-    simd::float2 texcoord;
+    float3 position;
+    float3 normal;
+    float2 texcoord;
 };
 
 // 定义每一棵草的数据
 struct InstanceData {
-    simd::float4x4 modelMatrix; 
+    float4x4 modelMatrix; 
 };
 
 struct Uniforms {
-    simd::float4x4 viewMatrix;
-    simd::float4x4 projectionMatrix;
-    simd::float3 lightDirection; // 光源方向
-    simd::float3 lightColor; // 光源颜色
+    float4x4 viewMatrix;
+    float4x4 projectionMatrix;
+    float3 lightDirection; // 光源方向
+    float3 lightColor; // 光源颜色
     float time; // 时间，用于风吹草动
 };
