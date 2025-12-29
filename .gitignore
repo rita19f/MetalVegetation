@@ -1,0 +1,26 @@
+# Build directories
+build/
+cmake-build-*/
+
+# CMake
+CMakeFiles/
+CMakeCache.txt
+Makefile
+cmake_install.cmake
+
+# Compiled objects
+*.o
+*.obj
+*.a
+*.so
+*.dylib
+
+# Metal / shader outputs
+*.air
+*.metallib
+
+# Binaries
+bin/
+
+# macOS
+.DS_Store
