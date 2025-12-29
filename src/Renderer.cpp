@@ -446,10 +446,11 @@ void Renderer::buildBuffers()
     // We generate kGrassRows rows, each with left and right vertices.
     // UV.y goes from 1.0 at the bottom to 0.0 at the top.
 
-    // Adjust proportions for chunky & cute look (shorter and wider)
-    // Increase width significantly and reduce height by 30% to avoid "tall and thin" ribbon look
-    const float baseWidth = 0.2f;    // Much wider base (was 0.12) for chunkier look
-    const float tipWidth = 0.08f;    // Wider tip (was 0.06) to maintain proportion
+    // Fix texture distortion: Use rectangular strip (or very slightly tapered)
+    // The texture alpha defines the shape, NOT the mesh geometry
+    // Making it rectangular prevents texture squeezing at the top
+    const float baseWidth = 0.25f;   // Slightly wider base
+    const float tipWidth = 0.25f;    // SAME as base width - rectangular strip (no pinching)
     const float heightScale = 0.7f;  // Reduce height by 30% (0.7 = 70% of original)
 
     Vertex vertices[kGrassVertexCount];
@@ -457,8 +458,9 @@ void Renderer::buildBuffers()
     for (int row = 0; row < kGrassRows; ++row) {
         float t = static_cast<float>(row) / static_cast<float>(kGrassSegments); // 0 bottom -> 1 top
 
-        // Non-linear taper: emphasize thinning near the tip
-        float width = baseWidth + (tipWidth - baseWidth) * (t * t); // quadratic taper
+        // Rectangular strip: constant width (or very slight taper if tipWidth < baseWidth)
+        // Since baseWidth == tipWidth, this creates a perfect rectangle
+        float width = baseWidth + (tipWidth - baseWidth) * t; // Linear interpolation (or constant if equal)
         float halfWidth = width;
 
         // Reduced height: -0.35 .. +0.35 (30% shorter than original -0.5 .. +0.5)

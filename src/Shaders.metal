@@ -236,27 +236,37 @@ fragment float4 fragmentMain(
     // ============================================================================
     // 2. Procedural Coloring: Generate vertical gradient RGB (ignore texture RGB)
     // ============================================================================
-    // Define Ghibli-style colors
-    float3 darkGreen = float3(0.2, 0.5, 0.2);   // Dark green at bottom (y=0)
-    float3 lightGreen = float3(0.4, 0.8, 0.4);  // Light green at top (y=1)
+    // Calculate height factor: t=0.0 at root (bottom), t=1.0 at tip (top)
+    // Assuming texture Y=1 is bottom and Y=0 is top (common in Metal/stb_image)
+    // We want t=0 at bottom, t=1 at top for the gradient
+    float t = 1.0 - in.texcoord.y; // t=0 at bottom (texcoord.y=1), t=1 at top (texcoord.y=0)
     
-    // Create vertical gradient based on UV.y
-    // in.texcoord.y: 0 = top of grass, 1 = bottom of grass
-    // We want dark at bottom (y=1) and light at top (y=0), so use (1.0 - in.texcoord.y)
-    float gradientFactor = 1.0 - in.texcoord.y;
-    float3 baseColor = mix(darkGreen, lightGreen, gradientFactor);
+    // Define Colors (Lush Green Style)
+    float3 rootColor = float3(0.05, 0.2, 0.05);   // Very Dark Green (almost black) at roots
+    float3 midColor  = float3(0.1, 0.5, 0.1);     // Healthy Base Green in middle
+    float3 tipColor  = float3(0.4, 0.8, 0.2);     // Vibrant but not neon green at tips
+    
+    // Multi-stop gradient for better look
+    float3 gradientColor;
+    if (t < 0.5) {
+        // Bottom half: root to mid
+        gradientColor = mix(rootColor, midColor, t * 2.0);
+    } else {
+        // Top half: mid to tip
+        gradientColor = mix(midColor, tipColor, (t - 0.5) * 2.0);
+    }
     
     // ============================================================================
-    // 3. Per-Instance Color Variation: Break visual repetition (Boosted)
+    // 3. Per-Instance Color Variation: Lush Green Variations
     // ============================================================================
     // Use instance hash for per-blade distinctness (passed from vertex shader)
     float noise = in.instanceHash; // Returns 0.0 to 1.0
     
-    // Create distinct dry/straw color (yellowish)
-    float3 dryColor = float3(0.8, 0.7, 0.4); // Yellowish/Straw color
+    // Create lighter green variation (fresh, not dead)
+    float3 lighterGreen = float3(0.2, 0.7, 0.3); // Fresh, lighter green variation
     
-    // Mix base color with dry color - up to 70% dry for maximum variation visibility
-    float3 variedColor = mix(baseColor, dryColor, noise * 0.7); // Max 70% variation
+    // Mix base gradient color with lighter variation - subtle mix for natural variation
+    float3 variedColor = mix(gradientColor, lighterGreen, noise * 0.3); // Max 30% variation
     
     // ============================================================================
     // 4. Half-Lambert Diffuse + Translucency (Ghibli-style lighting)
@@ -283,9 +293,9 @@ fragment float4 fragmentMain(
     // Blinn-Phong half vector
     float3 halfDir = normalize(sunDir + viewDir);
     
-    // Specular calculation
-    float specularStrength = 0.15; // Subtle specular
-    float specularPower = 64.0; // Crisp, tight highlight (increased from 32.0 for sharper shine)
+    // Specular calculation (softened for less plastic look)
+    float specularStrength = 0.1; // Reduced from 0.15 for softer highlights
+    float specularPower = 64.0; // Crisp, tight highlight
     float spec = pow(max(0.0, dot(normal, halfDir)), specularPower) * specularStrength;
     
     // Make specular stronger near tips (where UV.y is closer to 0)
@@ -305,11 +315,16 @@ fragment float4 fragmentMain(
     // 7. Stronger Ambient Occlusion (AO) at Roots
     // ============================================================================
     // Strictly enforce darker roots to blend with dark green ground
-    // Bottom 40% gets progressively darker (in.texcoord.y: 1 = bottom, 0 = top)
-    float ao = smoothstep(0.0, 0.4, in.texcoord.y); // 1.0 at bottom, 0.0 at top 40%
+    // t=0.0 at bottom (root), t=1.0 at top (tip)
+    // We want darkening ONLY at the bottom 40%
+    // smoothstep(0.0, 0.4, t) gives 0.0 at t=0 (root), 1.0 at t=0.4 (transition point)
+    float occlusion = smoothstep(0.0, 0.4, t);
     
-    // Apply AO: roots are shadow-dark (0.3), tips are bright (1.0)
-    finalColor *= (0.3 + 0.7 * ao);
+    // Apply intensity: 0.3 brightness at root (dark), 1.0 brightness at tip (bright)
+    float aoFactor = 0.3 + 0.7 * occlusion;
+    
+    // Apply AO to the color: roots are shadow-dark, tips are fully lit
+    finalColor *= aoFactor;
     
     // Return final color with smoothed opacity for Alpha-to-Coverage
     return float4(finalColor, opacity);
