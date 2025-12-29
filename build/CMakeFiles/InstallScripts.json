@@ -1,9 +1,0 @@
-{
-	"InstallScripts" : 
-	[
-		"/Users/yuyuan/MetalVegetation/build/cmake_install.cmake",
-		"/Users/yuyuan/MetalVegetation/build/external/glfw/cmake_install.cmake",
-		"/Users/yuyuan/MetalVegetation/build/external/glfw/src/cmake_install.cmake"
-	],
-	"Parallel" : false
-}
