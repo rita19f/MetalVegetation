@@ -22,6 +22,24 @@ float hash(uint instanceID) {
     return random(float(instanceID) * 0.12345 + 500.0);
 }
 
+// ---------------------------------------------------------
+// IMPROVED NOISE FUNCTION (Bilinear Smooth)
+// ---------------------------------------------------------
+float noise2D(float2 p) {
+    float2 i = floor(p);
+    float2 f = fract(p);
+    float2 u = f * f * (3.0 - 2.0 * f); // Cubic smoothing
+    
+    // Hash function integrated
+    float2 magic = float2(12.9898, 78.233);
+    float a = fract(sin(dot(i, magic)) * 43758.5453);
+    float b = fract(sin(dot(i + float2(1.0, 0.0), magic)) * 43758.5453);
+    float c = fract(sin(dot(i + float2(0.0, 1.0), magic)) * 43758.5453);
+    float d = fract(sin(dot(i + float2(1.0, 1.0), magic)) * 43758.5453);
+    
+    return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+}
+
 // Struct to hold instance variation data
 struct InstanceVariation {
     float rotation;
@@ -68,6 +86,9 @@ float4x4 rotationY(float angle) {
     );
 }
 
+// ---------------------------------------------------------
+// OPTIMIZED VERTEX SHADER
+// ---------------------------------------------------------
 vertex RasterizerData vertexMain(
     uint vertexID [[vertex_id]],
     uint instanceID [[instance_id]],
@@ -76,130 +97,110 @@ vertex RasterizerData vertexMain(
     constant Uniforms &uniforms [[buffer(BufferIndexUniforms)]]
 ) {
     RasterizerData out;
-    
-    // Get the current instance data
     InstanceData instance = instances[instanceID];
     
-    // Extract world position from instance model matrix (translation component)
+    // 1. Get Base Instance World Position
     float3 instanceWorldPos = float3(
-        instance.modelMatrix.columns[3].x,
-        instance.modelMatrix.columns[3].y,
+        instance.modelMatrix.columns[3].x, 
+        instance.modelMatrix.columns[3].y, 
         instance.modelMatrix.columns[3].z
     );
     
-    // ============================================================================
-    // 3. Randomization: Generate random rotation and scale per instance
-    // ============================================================================
+    // 2. Randomization & Attributes
     InstanceVariation variation = getInstanceVariation(instanceID);
     float randomRotation = variation.rotation;
     float randomScale = variation.scale;
     
-    // ============================================================================
-    // 2. Cylindrical Billboarding: Rotate quad to face camera (Y-axis only)
-    // ============================================================================
-    // Calculate direction from grass position to camera
+    // 3. Billboard Rotation Calculation
     float3 toCamera = normalize(uniforms.cameraPosition - instanceWorldPos);
-    
-    // Project to XZ plane (remove Y component) for cylindrical billboarding
     float3 toCameraXZ = normalize(float3(toCamera.x, 0.0, toCamera.z));
-    
-    // Calculate angle to rotate around Y-axis to face camera
     float billboardAngle = atan2(toCameraXZ.x, toCameraXZ.z);
-    
-    // Combine random rotation with billboard rotation
     float finalRotation = billboardAngle + randomRotation;
-    
-    // Build rotation matrix around Y-axis
     float4x4 billboardRotation = rotationY(finalRotation);
     
-    // ============================================================================
-    // Apply transformations
-    // ============================================================================
-    // Read vertex position (local space, relative to quad center)
+    // 4. Vertex Setup
     float3 vertexPosition = vertices[vertexID].position;
     float2 texcoord = vertices[vertexID].texcoord;
+    float t = 1.0 - texcoord.y; // 0=Root, 1=Tip
     
-    // ============================================================================
-    // 3. Random Initial Tilt: Real grass doesn't grow straight up
-    // ============================================================================
+    // 5. Initial Tilt (Local Space)
     float initialTiltAngle = getInitialTilt(instanceID);
-    float tiltAxisChoice = random(float(instanceID) * 0.9 + 400.0); // 0-1, choose X or Z axis
-    
-    // Simple tilt: rotate around X or Z axis randomly
+    float tiltAxisChoice = hash(instanceID); 
     float c = cos(initialTiltAngle);
     float s = sin(initialTiltAngle);
     
     if (tiltAxisChoice < 0.5) {
-        // Tilt around X-axis (lean forward/backward)
-        float y = vertexPosition.y;
-        float z = vertexPosition.z;
-        vertexPosition.y = y * c - z * s;
-        vertexPosition.z = y * s + z * c;
+        float y = vertexPosition.y; float z = vertexPosition.z;
+        vertexPosition.y = y * c - z * s; vertexPosition.z = y * s + z * c;
     } else {
-        // Tilt around Z-axis (lean left/right)
-        float x = vertexPosition.x;
-        float y = vertexPosition.y;
-        vertexPosition.x = x * c - y * s;
-        vertexPosition.y = x * s + y * c;
+        float x = vertexPosition.x; float y = vertexPosition.y;
+        vertexPosition.x = x * c - y * s; vertexPosition.y = x * s + y * c;
     }
     
-    // Apply random scale
+    // Apply Random Scale
     vertexPosition *= randomScale;
     
-    // ============================================================================
-    // 2. Aggressive Bending with Parabolic Drop (Length-Preserving Look)
-    // ============================================================================
-    // Get random bend direction angle (0 to 2*PI)
-    float bendDirectionAngle = getBendDirection(instanceID);
-    float3 bendDirection = float3(cos(bendDirectionAngle), 0.0, sin(bendDirectionAngle));
-    
-    // Wind Animation: Time-based sine wave with instance variation
-    float windSpeed = 2.5; // Wind speed multiplier
-    float wind = sin(uniforms.time * windSpeed + float(instanceID) * 0.1);
-    
-    // Bend strength base
-    float windIntensity = 0.5; // Overall wind intensity
-    float bendBase = wind * windIntensity;
-    
-    // Parabolic curve: stronger effect towards the tip
-    float t = 1.0 - texcoord.y;           // 0 at bottom (uv.y=1), 1 at top (uv.y=0)
-    float bendStrength = bendBase * (t * t); // Quadratic dependence on height
-    
-    // 1. Move tip outwards (XZ plane)
-    vertexPosition.xz += bendDirection.xz * bendStrength;
-    
-    // 2. Move tip downwards to simulate curvature and approximate length preservation
-    vertexPosition.y -= abs(bendStrength) * 0.4;
-    
-    // ============================================================================
-    // Apply billboard rotation (rotate around Y-axis to face camera)
-    // ============================================================================
+    // 6. APPLY ROTATION FIRST (Transform to World Orientation)
+    // We rotate the blade *before* bending it. 
+    // This ensures the bend direction is independent of the blade's facing direction.
     float4 rotatedPos = billboardRotation * float4(vertexPosition, 1.0);
+    float3 finalWorldPos = instanceWorldPos + rotatedPos.xyz;
     
-    // Translate to world position
-    float3 worldPos = instanceWorldPos + rotatedPos.xyz;
+    // --- NEW NATURAL WIND PHYSICS ---
     
-    // Calculate final position using View/Projection matrices
-    float4 pos = uniforms.projectionMatrix * uniforms.viewMatrix * float4(worldPos, 1.0);
+    // 1. Idle Chaos (Omni-directional swaying)
+    // Every blade sways in a slightly different direction naturally
+    float tTime = uniforms.time;
+    float seed = float(instanceID);
+    float idleFreq = 2.0 + hash(instanceID) * 1.0; // Random speed
+    float idlePhase = seed * 13.0;
     
-    // ============================================================================
-    // 3. Hybrid Normals: Forward-Up blend for directional shading
-    // ============================================================================
-    // Calculate forward normal (the direction the blade face is looking)
-    // The blade faces forward in local space (0, 0, 1), rotated by billboard rotation
-    float3 forwardLocal = float3(0.0, 0.0, 1.0); // Forward direction in local space
+    // Random localized sway vector (not aligned with wind)
+    float2 randomAxis = normalize(float2(hash(seed) * 2.0 - 1.0, hash(seed + 123.0) * 2.0 - 1.0));
+    float idleMag = sin(tTime * idleFreq + idlePhase) * 0.08; // Small amplitude
+    float2 totalDisp = randomAxis * idleMag;
+    
+    // 2. Coherent Wind Gusts (The "Wave")
+    // float2 windDir = normalize(uniforms.sunDirection.xz);
+    float2 windDir = normalize(float2(1.0, 1.0));
+    float scrollSpeed = 1.5;
+    float2 windUV = instanceWorldPos.xz * 0.05 + windDir * tTime * scrollSpeed; // Lower frequency for larger waves
+    float noiseVal = noise2D(windUV); // 0.0 to 1.0
+    
+    // Smooth gust curve (no hard cutoffs)
+    // float gustPower = pow(noiseVal, 2.0) * 0.8; // Exponential curve for "puffs" of wind
+    float gustPower = smoothstep(0.3, 0.8, noiseVal) * 0.6;
+    
+    // Add Gust to Displacement (Biased by wind direction, but jittered)
+    // Jitter the gust direction slightly per instance so they don't look parallel
+    float2 gustJitter = randomAxis * 0.2; 
+    totalDisp += (windDir + gustJitter) * gustPower;
+    
+    // 3. Apply Physical Bending (Parabolic Profile)
+    float bendProfile = t * t;  // Tip bends much more than root
+    
+    // Apply Horizontal Displacement
+    finalWorldPos.xz += totalDisp * bendProfile;
+    
+    // 4. Arc-Length Compensation (Fix Stretching)
+    // The further we push XZ, the more we drop Y to keep the blade length constant.
+    // Approximation: y -= dist^2 * 1.5
+    float dist = length(totalDisp * bendProfile);
+    finalWorldPos.y -= dist * dist * 0.6; // Stronger dip to compensate for the "long" look
+
+    // 9. Final Position Output
+    float4 pos = uniforms.projectionMatrix * uniforms.viewMatrix * float4(finalWorldPos, 1.0);
+    
+    // 10. Hybrid Normals
+    float3 forwardLocal = float3(0.0, 0.0, 1.0);
     float3 forwardNormal = (billboardRotation * float4(forwardLocal, 0.0)).xyz;
-    
-    // Mix forward direction (50%) with up direction (80%) for stylized normal
-    // This keeps softness but adds enough directional shading so blades catch light
     float3 stylizedNormal = normalize(forwardNormal * 0.5 + float3(0.0, 1.0, 0.0) * 0.8);
     
-    // Output position and attributes
     out.position = pos;
     out.texcoord = texcoord;
-    out.normal = stylizedNormal; // Use hybrid forward-up normal for directional shading
-    out.worldPos = worldPos; // Pass world position for view direction calculation
-    out.instanceHash = hash(instanceID); // Pass instance hash for color variation
+    out.normal = stylizedNormal;
+    out.worldPos = finalWorldPos;
+    out.instanceHash = hash(instanceID);
     
     return out;
 }
