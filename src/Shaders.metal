@@ -10,6 +10,7 @@ struct RasterizerData {
     float3 normal;
     float3 worldPos; // World position for view direction calculation
     float instanceHash; // Hash value from instanceID for color variation
+    float windStrength; // Wind bend amount for "Wind Sheen" effect (Ghibli style)
 };
 
 // Pseudo-random function based on instance ID
@@ -86,8 +87,15 @@ float4x4 rotationY(float angle) {
     );
 }
 
+// Rodrigues' rotation formula - preserves both length and width/volume
+float3 rotateVector(float3 v, float3 axis, float angle) {
+    float s = sin(angle);
+    float c = cos(angle);
+    return v * c + axis * dot(axis, v) * (1.0 - c) + cross(axis, v) * s;
+}
+
 // ---------------------------------------------------------
-// OPTIMIZED VERTEX SHADER
+// OPTIMIZED VERTEX SHADER (FIXED SWAY & NORMALS)
 // ---------------------------------------------------------
 vertex RasterizerData vertexMain(
     uint vertexID [[vertex_id]],
@@ -123,82 +131,106 @@ vertex RasterizerData vertexMain(
     float2 texcoord = vertices[vertexID].texcoord;
     float t = 1.0 - texcoord.y; // 0=Root, 1=Tip
     
-    // 5. Initial Tilt (Local Space)
+    // 5. Initial Tilt
     float initialTiltAngle = getInitialTilt(instanceID);
     float tiltAxisChoice = hash(instanceID); 
     float c = cos(initialTiltAngle);
     float s = sin(initialTiltAngle);
-    
     if (tiltAxisChoice < 0.5) {
-        float y = vertexPosition.y; float z = vertexPosition.z;
-        vertexPosition.y = y * c - z * s; vertexPosition.z = y * s + z * c;
+        vertexPosition.y = vertexPosition.y * c - vertexPosition.z * s; vertexPosition.z = vertexPosition.y * s + vertexPosition.z * c;
     } else {
-        float x = vertexPosition.x; float y = vertexPosition.y;
-        vertexPosition.x = x * c - y * s; vertexPosition.y = x * s + y * c;
+        vertexPosition.x = vertexPosition.x * c - vertexPosition.y * s; vertexPosition.y = vertexPosition.x * s + vertexPosition.y * c;
     }
+    vertexPosition *= variation.scale;
     
-    // Apply Random Scale
-    vertexPosition *= randomScale;
-    
-    // 6. APPLY ROTATION FIRST (Transform to World Orientation)
-    // We rotate the blade *before* bending it. 
-    // This ensures the bend direction is independent of the blade's facing direction.
+    // 6. Define Initial World Position (Pre-Wind)
     float4 rotatedPos = billboardRotation * float4(vertexPosition, 1.0);
     float3 finalWorldPos = instanceWorldPos + rotatedPos.xyz;
     
-    // --- NEW NATURAL WIND PHYSICS ---
+    // ============================================================
+    // [START] WIND PHYSICS & ROTATION LOGIC
+    // ============================================================
     
-    // 1. Idle Chaos (Omni-directional swaying)
-    // Every blade sways in a slightly different direction naturally
+    // 1. Idle Chaos (呼吸感)
     float tTime = uniforms.time;
     float seed = float(instanceID);
-    float idleFreq = 2.0 + hash(instanceID) * 1.0; // Random speed
+    float idleFreq = 2.0 + hash(instanceID) * 1.5; 
     float idlePhase = seed * 13.0;
+    // 微风幅度稍微加大，确保静止时也有动态
+    float idleStrength = sin(tTime * idleFreq + idlePhase) * 0.08; 
     
-    // Random localized sway vector (not aligned with wind)
-    float2 randomAxis = normalize(float2(hash(seed) * 2.0 - 1.0, hash(seed + 123.0) * 2.0 - 1.0));
-    float idleMag = sin(tTime * idleFreq + idlePhase) * 0.08; // Small amplitude
-    float2 totalDisp = randomAxis * idleMag;
+    // 2. Roystan-Style Fluid Wind (主风浪)
+    float2 windDir = normalize(float2(1.0, 0.5)); 
     
-    // 2. Coherent Wind Gusts (The "Wave")
-    // float2 windDir = normalize(uniforms.sunDirection.xz);
-    float2 windDir = normalize(float2(1.0, 1.0));
-    float scrollSpeed = 1.5;
-    float2 windUV = instanceWorldPos.xz * 0.05 + windDir * tTime * scrollSpeed; // Lower frequency for larger waves
-    float noiseVal = noise2D(windUV); // 0.0 to 1.0
+    // A. Main Swell (大波浪)
+    // [关键修复] 移除 +0.5 的强制正向偏移，允许负值回弹
+    float swellPhase = dot(instanceWorldPos.xz, windDir);
+    float rawSine = sin(swellPhase * 0.05 - tTime * 1.0); // -1 到 1
     
-    // Smooth gust curve (no hard cutoffs)
-    // float gustPower = pow(noiseVal, 2.0) * 0.8; // Exponential curve for "puffs" of wind
-    float gustPower = smoothstep(0.3, 0.8, noiseVal) * 0.6;
+    // 映射到 [-0.3, 1.0] 区间
+    // 1.0 (向右大倒伏) -> 0.0 (直立) -> -0.3 (向左惯性回弹)
+    // 这样草就会有"来回摆动"的感觉，而不仅仅是"磕头"
+    float mainSwell = rawSine * 0.65 + 0.35; 
     
-    // Add Gust to Displacement (Biased by wind direction, but jittered)
-    // Jitter the gust direction slightly per instance so they don't look parallel
-    float2 gustJitter = randomAxis * 0.2; 
-    totalDisp += (windDir + gustJitter) * gustPower;
+    // B. Turbulence (细节噪声)
+    float2 noiseUV = instanceWorldPos.xz * 0.2 - windDir * tTime * 2.0;
+    float turbulence = noise2D(noiseUV); // 0..1
+    // 让噪声也能稍微向左扰动 (-0.2 到 0.8)
+    turbulence = turbulence - 0.2;
     
-    // 3. Apply Physical Bending (Parabolic Profile)
-    float bendProfile = t * t;  // Tip bends much more than root
+    // C. Composite (混合)
+    float fluidWind = mix(mainSwell, turbulence, 0.3);
     
-    // Apply Horizontal Displacement
-    finalWorldPos.xz += totalDisp * bendProfile;
+    // 3. Combine Forces
+    float totalWindStrength = fluidWind + idleStrength;
     
-    // 4. Arc-Length Compensation (Fix Stretching)
-    // The further we push XZ, the more we drop Y to keep the blade length constant.
-    // Approximation: y -= dist^2 * 1.5
-    float dist = length(totalDisp * bendProfile);
-    finalWorldPos.y -= dist * dist * 0.6; // Stronger dip to compensate for the "long" look
-
-    // 9. Final Position Output
-    float4 pos = uniforms.projectionMatrix * uniforms.viewMatrix * float4(finalWorldPos, 1.0);
+    // 4. Calculate Rotation Angle (Linear Rigid)
+    // 增加一点灵敏度 (1.0 -> 1.2) 让摆动更明显
+    float bendAngle = totalWindStrength * t * 1.2; 
     
-    // 10. Hybrid Normals
+    // 5. Calculate Rotation Axis (With Jitter)
+    float axisJitter = (hash(seed) - 0.5) * 0.2; 
+    float3 windVector3D = normalize(float3(windDir.x, 0.0, windDir.y));
+    float3 jitteredWind = normalize(windVector3D + float3(windDir.y, 0.0, -windDir.x) * axisJitter);
+    
+    float3 upVector = float3(0.0, 1.0, 0.0);
+    float3 bendAxis = normalize(cross(upVector, jitteredWind));
+    
+    // 6. Apply Rodrigues Rotation to GEOMETRY
+    float3 localPos = finalWorldPos - instanceWorldPos;
+    localPos = rotateVector(localPos, bendAxis, bendAngle);
+    finalWorldPos = instanceWorldPos + localPos;
+    
+    // ============================================================
+    // [NEW FIX] ROTATE NORMALS (解决叶尖不正常/发黑问题)
+    // ============================================================
+    // 我们必须把法线也绕着同样的轴转动，否则光照会觉得草是直的
+    
+    // 1. 获取原始 Billboard 法线 (指向 Z 轴，随 Billboard 旋转)
     float3 forwardLocal = float3(0.0, 0.0, 1.0);
-    float3 forwardNormal = (billboardRotation * float4(forwardLocal, 0.0)).xyz;
-    float3 stylizedNormal = normalize(forwardNormal * 0.5 + float3(0.0, 1.0, 0.0) * 0.8);
+    float3 initialNormal = (billboardRotation * float4(forwardLocal, 0.0)).xyz;
+    
+    // 2. [关键] 应用完全相同的风力旋转
+    // 只有这样，法线才能正确反映弯曲后的几何体朝向
+    float3 rotatedNormal = rotateVector(initialNormal, bendAxis, bendAngle);
+    
+    // 3. 吉卜力风格化 (Stylized Up-Vector Blend)
+    // 混合一点 (0,1,0) 让光照更柔和，但基础必须是 rotatedNormal
+    float3 stylizedNormal = normalize(rotatedNormal * 0.6 + float3(0.0, 1.0, 0.0) * 0.6);
+
+    // ============================================================
+    // [END] PHYSICS
+    // ============================================================
+    
+    // Pass Output
+    // 高光只响应正向强风 (mainSwell)，忽略回弹阶段
+    out.windStrength = max(0.0, fluidWind); 
+
+    float4 pos = uniforms.projectionMatrix * uniforms.viewMatrix * float4(finalWorldPos, 1.0);
     
     out.position = pos;
     out.texcoord = texcoord;
-    out.normal = stylizedNormal;
+    out.normal = stylizedNormal; // 使用修正后的法线
     out.worldPos = finalWorldPos;
     out.instanceHash = hash(instanceID);
     
@@ -211,7 +243,7 @@ fragment float4 fragmentMain(
     constant Uniforms &uniforms [[buffer(BufferIndexUniforms)]]
 ) {
     // Define a constexpr sampler inside the shader function
-    constexpr sampler textureSampler(mag_filter::linear, min_filter::linear);
+    constexpr sampler textureSampler(mag_filter::linear, min_filter::linear, address::clamp_to_edge);
     
     // ============================================================================
     // 1. Analytic Antialiasing: Smooth alpha edges using derivatives
@@ -307,13 +339,32 @@ fragment float4 fragmentMain(
     float3 specularLight = uniforms.sunColor * spec;
     
     // ============================================================================
-    // 6. Final Color Composition
+    // 6. "Wind Sheen" Effect (Smart Sheen - Avoids Over-Exposure)
     // ============================================================================
-    // FinalColor = (GradientColor * RandomVariation) * (HalfLambert + Ambient) + Specular
-    float3 finalColor = variedColor * lighting + specularLight;
+    // Smart Sheen Logic (Avoids white-out)
+    float t_height = 1.0 - in.texcoord.y;
+    
+    // 1. Tip Mask: Only top 20%
+    float tipMask = smoothstep(0.8, 1.0, t_height);
+    
+    // 2. Wind Mask: Only show sheen on wave peaks
+    // fluidWind is 0..1. We only want sheen when wind > 0.6
+    float windMask = smoothstep(0.6, 1.0, in.windStrength);
+    
+    // 3. Color & Mix
+    float3 sheenColor = float3(0.9, 0.95, 0.8); // Pale Sunlit Yellow-Green
+    float sheenIntensity = tipMask * windMask * 0.6; // Max 60% opacity
+    
+    float3 windTintedColor = mix(variedColor, sheenColor, sheenIntensity);
     
     // ============================================================================
-    // 7. Stronger Ambient Occlusion (AO) at Roots
+    // 7. Final Color Composition
+    // ============================================================================
+    // FinalColor = (WindTintedColor * RandomVariation) * (HalfLambert + Ambient) + Specular
+    float3 finalColor = windTintedColor * lighting + specularLight;
+    
+    // ============================================================================
+    // 8. Stronger Ambient Occlusion (AO) at Roots
     // ============================================================================
     // Strictly enforce darker roots to blend with dark green ground
     // t=0.0 at bottom (root), t=1.0 at top (tip)
