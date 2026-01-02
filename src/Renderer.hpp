@@ -4,6 +4,7 @@
 #include <QuartzCore/QuartzCore.hpp> // metal-cpp CA::MetalLayer
 #include "Texture.hpp"
 #include "Camera.hpp"
+#include "ShaderTypes.h"
 
 struct GLFWwindow;
 
@@ -22,11 +23,15 @@ private:
     CA::MetalLayer* m_metalLayer; 
     MTL::RenderPipelineState* m_pso; // 管线状态 (grass)
     MTL::RenderPipelineState* m_groundPSO; // 地面管线状态
+    MTL::RenderPipelineState* m_capsulePSO; // 胶囊管线状态
     MTL::Buffer* m_vertexBuffer;     // 存放顶点数据
     MTL::Buffer* m_indexBuffer;      // 存放索引数据
     MTL::Buffer* m_instanceBuffer;   // 存放实例数据
     MTL::Buffer* m_uniformBuffer;    // 存放uniform数据
     MTL::Buffer* m_groundVertexBuffer; // 存放地面顶点数据
+    MTL::Buffer* m_capsuleVertexBuffer; // 存放胶囊顶点数据
+    MTL::Buffer* m_capsuleIndexBuffer;  // 存放胶囊索引数据
+    NS::UInteger m_capsuleIndexCount;   // 胶囊索引数量
     MTL::DepthStencilState* m_depthStencilState;
     MTL::Texture* m_depthTexture;    // 深度纹理 (resolve target)
     MTL::Texture* m_msaaColorTexture; // MSAA color render target
@@ -45,4 +50,6 @@ private:
     void buildInstanceBuffer(); // 创建实例缓冲区
     void buildTextures(); // 创建纹理
     void buildGround(); // 创建地面
+    void createCapsuleMesh(float radius, float midHeight, int radialSegments, int verticalSegments,
+                          std::vector<Vertex>& vertices, std::vector<uint16_t>& indices);
 };

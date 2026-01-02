@@ -45,4 +45,7 @@ struct Uniforms {
     float3 cameraPosition; // 相机位置，用于圆柱形广告牌
     float3 sunDirection; // 太阳方向，用于光照计算
     float3 sunColor; // 太阳颜色
+    float3 interactorPos; // The world position of the object crushing the grass
+    float interactorRadius; // How wide the crushing effect is (e.g., 2.0)
+    float interactorStrength; // How hard it pushes (e.g., 1.0)
 };

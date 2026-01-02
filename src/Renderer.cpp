@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <random>
 #include <cmath>
+#include <vector>
 
 // Grass mesh configuration: vertical segments for smooth bending
 static constexpr int kGrassSegments = 7;                 // At least 7 height segments
@@ -18,6 +19,10 @@ static constexpr int kGrassVertsPerRow = 2;              // Left + right per row
 static constexpr int kGrassVertexCount = kGrassRows * kGrassVertsPerRow;
 static constexpr int kGrassIndicesPerSegment = 6;        // 2 triangles per segment
 static constexpr int kGrassIndexCount = kGrassSegments * kGrassIndicesPerSegment;
+
+// Scene size: shared constant for ground plane and grass field
+// Ground and grass will both span from -SCENE_SIZE to +SCENE_SIZE (total size = 2 * SCENE_SIZE)
+static constexpr float SCENE_SIZE = 15.0f;              // Half-size, so total scene is 30x30 (compact, high-density)
 
 // Helper function to convert glm::mat4 to simd::float4x4
 static simd::float4x4 glmToSimd(const glm::mat4& glmMat) {
@@ -40,11 +45,15 @@ Renderer::Renderer(MTL::Device* device, CA::MetalLayer* layer)
     , m_commandQueue(nullptr)
     , m_pso(nullptr)
     , m_groundPSO(nullptr)
+    , m_capsulePSO(nullptr)
     , m_vertexBuffer(nullptr)
     , m_indexBuffer(nullptr)
     , m_instanceBuffer(nullptr)
     , m_uniformBuffer(nullptr)
     , m_groundVertexBuffer(nullptr)
+    , m_capsuleVertexBuffer(nullptr)
+    , m_capsuleIndexBuffer(nullptr)
+    , m_capsuleIndexCount(0)
     , m_depthStencilState(nullptr)
     , m_depthTexture(nullptr)
     , m_msaaColorTexture(nullptr)
@@ -117,6 +126,15 @@ Renderer::~Renderer()
     if (m_groundTexture) {
         delete m_groundTexture;
     }
+    if (m_capsulePSO) {
+        m_capsulePSO->release();
+    }
+    if (m_capsuleVertexBuffer) {
+        m_capsuleVertexBuffer->release();
+    }
+    if (m_capsuleIndexBuffer) {
+        m_capsuleIndexBuffer->release();
+    }
 }
 
 void Renderer::draw()
@@ -149,8 +167,8 @@ void Renderer::draw()
     
     // Set loadAction to MTL::LoadActionClear
     colorAttachment->setLoadAction(MTL::LoadActionClear);
-    // Set clearColor to sky blue (0.5, 0.7, 1.0, 1.0)
-    renderPassDescriptor->colorAttachments()->object(0)->setClearColor(MTL::ClearColor(0.5, 0.7, 1.0, 1.0));
+    // Set clearColor to match fog color (0.4, 0.6, 0.9, 1.0) for seamless blending
+    renderPassDescriptor->colorAttachments()->object(0)->setClearColor(MTL::ClearColor(0.4, 0.6, 0.9, 1.0));
     
     // Set storeAction: Store and resolve if MSAA, otherwise just store
     if (m_msaaColorTexture) {
@@ -217,6 +235,18 @@ void Renderer::draw()
         glm::vec3 camPos = m_camera->position;
         uniforms.cameraPosition = simd::make_float3(camPos.x, camPos.y, camPos.z);
         
+        // Set interactor position (circular motion for demonstration)
+        float radius = 3.0f;
+        float speed = 1.0f;
+        float time = uniforms.time;
+        uniforms.interactorPos = simd::make_float3(
+            sin(time * speed) * radius,
+            0.5f,
+            cos(time * speed) * radius
+        );
+        uniforms.interactorRadius = 1.0f;
+        uniforms.interactorStrength = 2.0f;
+        
         // Copy uniforms to buffer
         void* uniformContents = m_uniformBuffer->contents();
         memcpy(uniformContents, &uniforms, sizeof(Uniforms));
@@ -226,10 +256,10 @@ void Renderer::draw()
     // Create a RenderCommandEncoder
     MTL::RenderCommandEncoder* renderEncoder = commandBuffer->renderCommandEncoder(renderPassDescriptor);
     
-    // Set depth stencil state (shared for both passes)
+    // Set depth stencil state (shared for all passes)
     renderEncoder->setDepthStencilState(m_depthStencilState);
     
-    //  Pass 1: Ground
+    // Pass 1: Ground
 
     if (m_groundPSO && m_groundVertexBuffer && m_groundTexture && m_groundTexture->getMetalTexture()) {
         // Explicit Binding: Set the correct PSO
@@ -275,7 +305,31 @@ void Renderer::draw()
         MTL::IndexTypeUInt16,
         m_indexBuffer,
         NS::UInteger(0),
-        NS::UInteger(10000));
+        NS::UInteger(20000));
+    
+    // Pass 3: Capsule (Interactor Visualization)
+    if (m_capsulePSO && m_capsuleVertexBuffer && m_capsuleIndexBuffer && m_capsuleIndexCount > 0) {
+        // Set capsule pipeline state
+        renderEncoder->setRenderPipelineState(m_capsulePSO);
+        
+        // Set depth stencil state (standard read/write)
+        renderEncoder->setDepthStencilState(m_depthStencilState);
+        
+        // Set vertex buffer (capsule mesh)
+        renderEncoder->setVertexBuffer(m_capsuleVertexBuffer, 0, BufferIndexMeshPositions);
+        
+        // Set uniform buffer (to pass interactorPos)
+        renderEncoder->setVertexBuffer(m_uniformBuffer, 0, BufferIndexUniforms);
+        renderEncoder->setFragmentBuffer(m_uniformBuffer, 0, BufferIndexUniforms);
+        
+        // Draw capsule
+        renderEncoder->drawIndexedPrimitives(
+            MTL::PrimitiveTypeTriangle,
+            NS::UInteger(m_capsuleIndexCount),
+            MTL::IndexTypeUInt16,
+            m_capsuleIndexBuffer,
+            NS::UInteger(0));
+    }
     
     // End encoding
     renderEncoder->endEncoding();
@@ -409,6 +463,56 @@ void Renderer::buildShaders()
     groundVertexFunctionName->release();
     groundFragmentFunctionName->release();
     
+    // Load Capsule Shaders
+    NS::String* capsuleVertexFunctionName = NS::String::string("vertexCapsule", NS::ASCIIStringEncoding);
+    NS::String* capsuleFragmentFunctionName = NS::String::string("fragmentCapsule", NS::ASCIIStringEncoding);
+    
+    MTL::Function* capsuleVertexFunction = library->newFunction(capsuleVertexFunctionName);
+    MTL::Function* capsuleFragmentFunction = library->newFunction(capsuleFragmentFunctionName);
+    
+    if (!capsuleVertexFunction || !capsuleFragmentFunction) {
+        std::cerr << "Failed to load capsule shader functions" << std::endl;
+        if (capsuleVertexFunction) capsuleVertexFunction->release();
+        if (capsuleFragmentFunction) capsuleFragmentFunction->release();
+        capsuleVertexFunctionName->release();
+        capsuleFragmentFunctionName->release();
+    } else {
+        // Create capsule pipeline descriptor
+        MTL::RenderPipelineDescriptor* capsulePipelineDescriptor = MTL::RenderPipelineDescriptor::alloc()->init();
+        capsulePipelineDescriptor->setVertexFunction(capsuleVertexFunction);
+        capsulePipelineDescriptor->setFragmentFunction(capsuleFragmentFunction);
+        
+        // Set color attachment pixel format
+        MTL::RenderPipelineColorAttachmentDescriptor* capsuleColorAttachment = capsulePipelineDescriptor->colorAttachments()->object(0);
+        capsuleColorAttachment->setPixelFormat(MTL::PixelFormatBGRA8Unorm);
+        
+        // Set depth pixel format
+        capsulePipelineDescriptor->setDepthAttachmentPixelFormat(MTL::PixelFormatDepth32Float);
+        
+        // Enable 4x MSAA for consistency
+        capsulePipelineDescriptor->setSampleCount(4);
+        
+        // Create m_capsulePSO
+        m_capsulePSO = m_device->newRenderPipelineState(capsulePipelineDescriptor, &error);
+        
+        if (!m_capsulePSO) {
+            if (error) {
+                NS::String* errorString = error->localizedDescription();
+                std::cerr << "Failed to create capsule render pipeline state: " << errorString->utf8String() << std::endl;
+                errorString->release();
+            } else {
+                std::cerr << "Failed to create capsule render pipeline state" << std::endl;
+            }
+        }
+        
+        // Release capsule shader resources
+        capsuleVertexFunction->release();
+        capsuleFragmentFunction->release();
+        capsulePipelineDescriptor->release();
+        capsuleVertexFunctionName->release();
+        capsuleFragmentFunctionName->release();
+    }
+    
     // Release library and pipeline descriptor
     library->release();
     pipelineDescriptor->release();
@@ -535,16 +639,46 @@ void Renderer::buildBuffers()
     if (!m_uniformBuffer) {
         std::cerr << "Failed to create uniform buffer" << std::endl;
     }
+    
+    // Generate capsule mesh
+    std::vector<Vertex> capsuleVertices;
+    std::vector<uint16_t> capsuleIndices;
+    createCapsuleMesh(0.5f, 1.0f, 128, 32, capsuleVertices, capsuleIndices);
+    
+    // Create capsule vertex buffer
+    size_t capsuleVertexDataSize = capsuleVertices.size() * sizeof(Vertex);
+    m_capsuleVertexBuffer = m_device->newBuffer(capsuleVertexDataSize, MTL::ResourceStorageModeShared);
+    
+    if (m_capsuleVertexBuffer) {
+        void* capsuleBufferContents = m_capsuleVertexBuffer->contents();
+        memcpy(capsuleBufferContents, capsuleVertices.data(), capsuleVertexDataSize);
+    } else {
+        std::cerr << "Failed to create capsule vertex buffer" << std::endl;
+    }
+    
+    // Create capsule index buffer
+    m_capsuleIndexCount = capsuleIndices.size();
+    size_t capsuleIndexDataSize = capsuleIndices.size() * sizeof(uint16_t);
+    m_capsuleIndexBuffer = m_device->newBuffer(capsuleIndexDataSize, MTL::ResourceStorageModeShared);
+    
+    if (m_capsuleIndexBuffer) {
+        void* capsuleIndexBufferContents = m_capsuleIndexBuffer->contents();
+        memcpy(capsuleIndexBufferContents, capsuleIndices.data(), capsuleIndexDataSize);
+    } else {
+        std::cerr << "Failed to create capsule index buffer" << std::endl;
+    }
 }
 
 void Renderer::buildInstanceBuffer()
 {
-    const int instanceCount = 10000;
+    const int instanceCount = 20000;  // High density for lush Ghibli look in compact 30x30 area
     
     // Initialize random number generator
     std::random_device rd;
     std::mt19937 gen(rd());
-    std::uniform_real_distribution<float> posDist(-10.0f, 10.0f);
+    // Use SCENE_SIZE to match ground plane dimensions
+    // Grass positions range from -SCENE_SIZE to +SCENE_SIZE
+    std::uniform_real_distribution<float> posDist(-SCENE_SIZE, SCENE_SIZE);
     std::uniform_real_distribution<float> rotDist(0.0f, 360.0f);
     std::uniform_real_distribution<float> scaleDist(0.8f, 1.2f);
     
@@ -552,7 +686,7 @@ void Renderer::buildInstanceBuffer()
     InstanceData instances[instanceCount];
     
     for (int i = 0; i < instanceCount; ++i) {
-        // Position: Random x between -10 and 10, Random z between -10 and 10. y is 0.
+        // Position: Random x and z within scene bounds (from -SCENE_SIZE to +SCENE_SIZE). y is 0.
         float x = posDist(gen);
         float z = posDist(gen);
         float y = 0.0f;
@@ -695,7 +829,7 @@ void Renderer::buildTextures()
 void Renderer::buildGround()
 {
     // Define vertices for a large quad (Plane) centered at (0,0,0)
-    // Size: 100.0f x 100.0f (From -50 to 50)
+    // Size: Uses SCENE_SIZE constant (From -SCENE_SIZE to +SCENE_SIZE)
     // Y-Position: -0.5f (Slightly below the grass roots so grass sticks into it)
     // Normals: Point Straight Up (0, 1, 0)
     // UVs: Scale them! Instead of 0..1, use 0..20.0f. This will tile the texture 20 times.
@@ -703,14 +837,14 @@ void Renderer::buildGround()
     // Use 6 vertices (2 triangles) directly to avoid managing a separate index buffer for the ground
     Vertex groundVertices[6] = {
         // First triangle
-        { {-50.0f, -0.5f, -50.0f}, {0.0f, 1.0f, 0.0f}, {0.0f, 20.0f} },   // Bottom-Left
-        { { 50.0f, -0.5f, -50.0f}, {0.0f, 1.0f, 0.0f}, {20.0f, 20.0f} },  // Bottom-Right
-        { {-50.0f, -0.5f,  50.0f}, {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f} },   // Top-Left
+        { {-SCENE_SIZE, -0.5f, -SCENE_SIZE}, {0.0f, 1.0f, 0.0f}, {0.0f, 20.0f} },   // Bottom-Left
+        { { SCENE_SIZE, -0.5f, -SCENE_SIZE}, {0.0f, 1.0f, 0.0f}, {20.0f, 20.0f} },  // Bottom-Right
+        { {-SCENE_SIZE, -0.5f,  SCENE_SIZE}, {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f} },   // Top-Left
         
         // Second triangle
-        { { 50.0f, -0.5f, -50.0f}, {0.0f, 1.0f, 0.0f}, {20.0f, 20.0f} },  // Bottom-Right
-        { { 50.0f, -0.5f,  50.0f}, {0.0f, 1.0f, 0.0f}, {20.0f, 0.0f} },   // Top-Right
-        { {-50.0f, -0.5f,  50.0f}, {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f} }     // Top-Left
+        { { SCENE_SIZE, -0.5f, -SCENE_SIZE}, {0.0f, 1.0f, 0.0f}, {20.0f, 20.0f} },  // Bottom-Right
+        { { SCENE_SIZE, -0.5f,  SCENE_SIZE}, {0.0f, 1.0f, 0.0f}, {20.0f, 0.0f} },   // Top-Right
+        { {-SCENE_SIZE, -0.5f,  SCENE_SIZE}, {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f} }     // Top-Left
     };
     
     // Create m_groundVertexBuffer with this data
@@ -723,6 +857,85 @@ void Renderer::buildGround()
         memcpy(bufferContents, groundVertices, groundVertexDataSize);
     } else {
         std::cerr << "Failed to create ground vertex buffer" << std::endl;
+    }
+}
+
+void Renderer::createCapsuleMesh(float radius, float midHeight, int radialSegments, int verticalSegments,
+                                 std::vector<Vertex>& vertices, std::vector<uint16_t>& indices)
+{
+    // Stretched Sphere Technique: Generate a perfect sphere, then stretch the middle section
+    // This ensures seamless continuity with smooth normals across the entire surface
+    
+    vertices.clear();
+    indices.clear();
+    
+    const float halfHeight = midHeight * 0.5f;
+    
+    // Generate sphere vertices
+    for (int ring = 0; ring <= verticalSegments; ++ring) {
+        float theta = static_cast<float>(ring) / static_cast<float>(verticalSegments) * M_PI; // 0 to PI
+        float sinTheta = sin(theta);
+        float cosTheta = cos(theta);
+        
+        for (int seg = 0; seg <= radialSegments; ++seg) {
+            float phi = static_cast<float>(seg) / static_cast<float>(radialSegments) * 2.0f * M_PI; // 0 to 2*PI
+            float sinPhi = sin(phi);
+            float cosPhi = cos(phi);
+            
+            // Generate sphere vertex position (unit sphere, will scale by radius)
+            float sphereY = cosTheta; // -1 to 1
+            float sphereX = sinTheta * cosPhi;
+            float sphereZ = sinTheta * sinPhi;
+            
+            // Calculate sphere normal (same as position for unit sphere)
+            simd::float3 sphereNormal = {sphereX, sphereY, sphereZ};
+            float len = sqrt(sphereNormal.x * sphereNormal.x + sphereNormal.y * sphereNormal.y + sphereNormal.z * sphereNormal.z);
+            if (len > 0.0001f) {
+                sphereNormal = {sphereNormal.x / len, sphereNormal.y / len, sphereNormal.z / len};
+            }
+            
+            // Scale by radius
+            float x = sphereX * radius;
+            float y = sphereY * radius;
+            float z = sphereZ * radius;
+            
+            // Stretch the middle section: if y > 0, shift up; if y < 0, shift down
+            if (y > 0.0f) {
+                y += halfHeight;
+            } else {
+                y -= halfHeight;
+            }
+            
+            Vertex v;
+            v.position = {x, y, z};
+            // CRUCIAL: Keep the original sphere normal - this ensures smooth lighting
+            v.normal = sphereNormal;
+            v.texcoord = {static_cast<float>(seg) / radialSegments, static_cast<float>(ring) / verticalSegments};
+            vertices.push_back(v);
+        }
+    }
+    
+    // Generate indices for sphere topology
+    for (int ring = 0; ring < verticalSegments; ++ring) {
+        int ringStart = ring * (radialSegments + 1);
+        int nextRingStart = (ring + 1) * (radialSegments + 1);
+        
+        for (int seg = 0; seg < radialSegments; ++seg) {
+            int current = ringStart + seg;
+            int next = ringStart + seg + 1;
+            int below = nextRingStart + seg;
+            int belowNext = nextRingStart + seg + 1;
+            
+            // First triangle
+            indices.push_back(static_cast<uint16_t>(current));
+            indices.push_back(static_cast<uint16_t>(below));
+            indices.push_back(static_cast<uint16_t>(next));
+            
+            // Second triangle
+            indices.push_back(static_cast<uint16_t>(next));
+            indices.push_back(static_cast<uint16_t>(below));
+            indices.push_back(static_cast<uint16_t>(belowNext));
+        }
     }
 }
 

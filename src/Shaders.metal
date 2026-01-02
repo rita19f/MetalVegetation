@@ -11,6 +11,8 @@ struct RasterizerData {
     float3 worldPos; // World position for view direction calculation
     float instanceHash; // Hash value from instanceID for color variation
     float windStrength; // Wind bend amount for "Wind Sheen" effect (Ghibli style)
+    float isYellow; // Flag for yellow-green withered grass (0.0 = normal, 1.0 = yellow)
+    float influence; // Interaction influence factor (1.0 = fully crushed, 0.0 = unaffected)
 };
 
 // Pseudo-random function based on instance ID
@@ -117,7 +119,6 @@ vertex RasterizerData vertexMain(
     // 2. Randomization & Attributes
     InstanceVariation variation = getInstanceVariation(instanceID);
     float randomRotation = variation.rotation;
-    float randomScale = variation.scale;
     
     // 3. Billboard Rotation Calculation
     float3 toCamera = normalize(uniforms.cameraPosition - instanceWorldPos);
@@ -222,6 +223,73 @@ vertex RasterizerData vertexMain(
     // [END] PHYSICS
     // ============================================================
     
+    // ============================================================
+    // [START] ADVANCED PHYSICS: CRUSH & BEND TRAMPLING EFFECT
+    // ============================================================
+    // Calculate distance from grass instance base to interactor
+    float3 interactorPos = uniforms.interactorPos;
+    float3 instancePos = instanceWorldPos; // Base position of this grass blade
+    float3 toInteractor = instancePos - interactorPos;
+    float dist = length(toInteractor);
+    
+    // Calculate influence factor: 1.0 at center (fully crushed), 0.0 at edge
+    float pushRadius = uniforms.interactorRadius;
+    // smoothstep(pushRadius, pushRadius * 0.4, dist) gives:
+    // - 1.0 when dist <= pushRadius * 0.4 (center, fully affected)
+    // - 0.0 when dist >= pushRadius (edge, unaffected)
+    // - Smooth transition in between
+    float influence = 1.0 - smoothstep(pushRadius * 0.4, pushRadius, dist);
+    
+    // Store influence for fragment shader (for shadow darkening)
+    out.influence = influence;
+    
+    // Apply deformation only if there's any influence
+    if (influence > 0.001) {
+        // Calculate push direction (outward from interactor)
+        float3 pushDir = normalize(toInteractor);
+        // Handle edge case where toInteractor is zero
+        if (length(pushDir) < 0.001) {
+            pushDir = float3(1.0, 0.0, 0.0); // Default direction
+        }
+        
+        // Get local position relative to instance base
+        float3 localPos = finalWorldPos - instancePos;
+        float originalHeight = localPos.y; // Store original height
+        
+        // ============================================================
+        // DEFORMATION A: VERTICAL CRUSH (The Weight)
+        // ============================================================
+        // Grass under the capsule should be flattened
+        // Squash height down to 10% at center, full height at edge
+        float crushFactor = mix(1.0, 0.1, influence);
+        localPos.y *= crushFactor;
+        
+        // ============================================================
+        // DEFORMATION B: RADIAL BEND (The Curve)
+        // ============================================================
+        // Push grass outward, but apply exponentially based on height
+        // Tip bends much more than root (simulates natural bending)
+        // t = 1.0 at tip, 0.0 at root
+        float bendFactor = influence * (t * t); // Quadratic: tip bends much more
+        
+        // Push tip outward strongly, root stays fixed
+        float2 pushXZ = pushDir.xz * bendFactor * 2.0;
+        localPos.x += pushXZ.x;
+        localPos.z += pushXZ.y;
+        
+        // Update final world position
+        finalWorldPos = instancePos + localPos;
+        
+        // Ensure grass doesn't go below ground level
+        finalWorldPos.y = max(instancePos.y, finalWorldPos.y);
+    } else {
+        // No influence, set to 0.0
+        out.influence = 0.0;
+    }
+    // ============================================================
+    // [END] ADVANCED PHYSICS: CRUSH & BEND TRAMPLING EFFECT
+    // ============================================================
+    
     // Pass Output
     // 高光只响应正向强风 (mainSwell)，忽略回弹阶段
     out.windStrength = max(0.0, fluidWind); 
@@ -233,6 +301,11 @@ vertex RasterizerData vertexMain(
     out.normal = stylizedNormal; // 使用修正后的法线
     out.worldPos = finalWorldPos;
     out.instanceHash = hash(instanceID);
+    
+    // Determine if this blade should be yellow-green (withered) - 10% probability
+    // Use a different hash seed to ensure independence from instanceHash
+    float yellowHash = hash(instanceID * 7 + 1000);
+    out.isYellow = (yellowHash > 0.9) ? 1.0 : 0.0;
     
     return out;
 }
@@ -290,7 +363,7 @@ fragment float4 fragmentMain(
     }
     
     // ============================================================================
-    // 3. Per-Instance Color Variation: Lush Green Variations
+    // 3. Per-Instance Color Variation: Lush Green Variations + Withered Yellow
     // ============================================================================
     // Use instance hash for per-blade distinctness (passed from vertex shader)
     float noise = in.instanceHash; // Returns 0.0 to 1.0
@@ -300,6 +373,12 @@ fragment float4 fragmentMain(
     
     // Mix base gradient color with lighter variation - subtle mix for natural variation
     float3 variedColor = mix(gradientColor, lighterGreen, noise * 0.3); // Max 30% variation
+    
+    // Yellow-green withered color for ~10% of blades
+    float3 dryColor = float3(0.85, 0.75, 0.3); // Ghibli-style yellow-green
+    
+    // Mix between normal green and yellow-green based on isYellow flag
+    variedColor = mix(variedColor, dryColor, in.isYellow);
     
     // ============================================================================
     // 4. Half-Lambert Diffuse + Translucency (Ghibli-style lighting)
@@ -378,6 +457,133 @@ fragment float4 fragmentMain(
     // Apply AO to the color: roots are shadow-dark, tips are fully lit
     finalColor *= aoFactor;
     
+    // ============================================================================
+    // 8.5. GROUNDING SHADOWS (Crushed Grass Darkening)
+    // ============================================================================
+    // Grass that is crushed (high influence) must be darker to simulate
+    // self-shadowing and contact shadows from being flattened
+    // Darken by 50% at the crush center (influence = 1.0)
+    float crushShadow = mix(1.0, 0.5, in.influence);
+    finalColor *= crushShadow;
+    
+    // ============================================================================
+    // 9. FAKE BLOB SHADOW (Capsule Grounding)
+    // ============================================================================
+    // Calculate horizontal distance from grass to interactor (ignore height)
+    float2 grassPosXZ = in.worldPos.xz;
+    float2 interactorPosXZ = uniforms.interactorPos.xz;
+    float shadowDist = distance(grassPosXZ, interactorPosXZ);
+    
+    // Shadow radius slightly larger than the collider for soft falloff
+    float shadowRadius = uniforms.interactorRadius * 1.2;
+    
+    // Create soft gradient: 0.0 = center (dark), 1.0 = edge (bright)
+    // smoothstep creates a smooth transition from dark center to bright edge
+    float shadowFactor = smoothstep(0.0, shadowRadius, shadowDist);
+    
+    // Clamp minimum brightness so shadow doesn't get too dark (maintains visibility)
+    // This simulates ambient light even in shadowed areas
+    shadowFactor = saturate(shadowFactor + 0.4); // Min brightness 0.4 (40% of original)
+    
+    // Apply shadow darkening to grass color
+    finalColor *= shadowFactor;
+    
+    // ============================================================================
+    // 10. GHIBLI STYLE DISTANCE FOG
+    // ============================================================================
+    // Calculate distance from camera to this fragment
+    float dist = length(in.worldPos - uniforms.cameraPosition);
+    
+    // Fog Parameters (Adjust these based on your scene scale)
+    // Start: Fog begins at 15 meters (grass is clear close up)
+    // End: Fog becomes fully opaque at 45 meters (hides the edge of the plane)
+    float fogStart = 15.0;
+    float fogEnd = 45.0;
+    
+    // Calculate Fog Factor (0.0 = No Fog, 1.0 = Full Fog)
+    // smoothstep creates a soft, non-linear transition that looks more natural
+    float fogFactor = smoothstep(fogStart, fogEnd, dist);
+    
+           // Fog Color: Needs to match Clear Color!
+    // Ghibli Style: A nice, soft sky blue (not dull gray)
+    float3 fogColor = float3(0.4, 0.6, 0.9); 
+    
+    // Mix the grass color with the fog color based on distance
+    finalColor = mix(finalColor, fogColor, fogFactor);
+    
     // Return final color with smoothed opacity for Alpha-to-Coverage
     return float4(finalColor, opacity);
+}
+
+// ============================================================================
+// CAPSULE SHADERS (Interactor Visualization)
+// ============================================================================
+
+struct CapsuleRasterizerData {
+    float4 position [[position]];
+    float3 worldPos;
+    float3 normal;
+};
+
+vertex CapsuleRasterizerData vertexCapsule(
+    uint vertexID [[vertex_id]],
+    constant Vertex *vertices [[buffer(BufferIndexMeshPositions)]],
+    constant Uniforms &uniforms [[buffer(BufferIndexUniforms)]]
+) {
+    CapsuleRasterizerData out;
+    
+    // Get vertex position in local space
+    float3 localPos = vertices[vertexID].position;
+    
+    // Translate to interactor position
+    float3 worldPos = localPos + uniforms.interactorPos;
+    
+    // Transform to clip space
+    out.position = uniforms.projectionMatrix * uniforms.viewMatrix * float4(worldPos, 1.0);
+    out.worldPos = worldPos;
+    
+    // Pass normal in object space (no rotation applied, so object space = world space)
+    // Normalize to ensure it's unit length after interpolation
+    out.normal = normalize(vertices[vertexID].normal);
+    
+    return out;
+}
+
+fragment float4 fragmentCapsule(
+    CapsuleRasterizerData in [[stage_in]],
+    constant Uniforms &uniforms [[buffer(BufferIndexUniforms)]]
+) {
+    // Blinn-Phong Lighting for Shiny Plastic Material
+    
+    // Normalize interpolated normal
+    float3 normal = normalize(in.normal);
+    
+    // Hardcoded directional light from top-right
+    float3 lightDir = normalize(float3(1.0, 2.0, 1.0));
+    
+    // Calculate view direction (from fragment to camera)
+    float3 viewDir = normalize(uniforms.cameraPosition - in.worldPos);
+    
+    // Material properties
+    float3 diffuseColor = float3(0.9, 0.9, 0.9); // Bright white/grey
+    float specularStrength = 0.8; // High specular for glossy look
+    float shininess = 64.0; // Sharp, glossy highlight
+    
+    // Ambient component
+    float3 ambient = float3(0.2, 0.2, 0.2);
+    
+    // Diffuse component (Lambertian)
+    float NdotL = max(0.0, dot(normal, lightDir));
+    float3 diffuse = diffuseColor * NdotL;
+    
+    // Specular component (Blinn-Phong)
+    float3 halfDir = normalize(lightDir + viewDir);
+    float NdotH = max(0.0, dot(normal, halfDir));
+    float specular = pow(NdotH, shininess) * specularStrength;
+    float3 specularColor = float3(1.0, 1.0, 1.0) * specular;
+    
+    // Final color: Ambient + Diffuse + Specular
+    float3 finalColor = ambient + diffuse + specularColor;
+    
+    return float4(finalColor, 1.0);
 }
