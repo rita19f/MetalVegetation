@@ -45,15 +45,15 @@ Renderer::Renderer(MTL::Device* device, CA::MetalLayer* layer)
     , m_commandQueue(nullptr)
     , m_pso(nullptr)
     , m_groundPSO(nullptr)
-    , m_capsulePSO(nullptr)
+    , m_ballPSO(nullptr)
     , m_vertexBuffer(nullptr)
     , m_indexBuffer(nullptr)
     , m_instanceBuffer(nullptr)
     , m_uniformBuffer(nullptr)
     , m_groundVertexBuffer(nullptr)
-    , m_capsuleVertexBuffer(nullptr)
-    , m_capsuleIndexBuffer(nullptr)
-    , m_capsuleIndexCount(0)
+    , m_ballVertexBuffer(nullptr)
+    , m_ballIndexBuffer(nullptr)
+    , m_ballIndexCount(0)
     , m_depthStencilState(nullptr)
     , m_depthTexture(nullptr)
     , m_msaaColorTexture(nullptr)
@@ -64,6 +64,12 @@ Renderer::Renderer(MTL::Device* device, CA::MetalLayer* layer)
     , m_firstMouse(true)
     , m_lastX(400.0f)
     , m_lastY(300.0f)
+    , m_trampleMapA(nullptr)
+    , m_trampleMapB(nullptr)
+    , m_trampleMapSwap(false)
+    , m_trampleComputePSO(nullptr)
+    , m_showTrampleMap(false)
+    , m_prevTKeyState(false)
 {
     // Create a CommandQueue
     m_commandQueue = m_device->newCommandQueue();
@@ -77,6 +83,7 @@ Renderer::Renderer(MTL::Device* device, CA::MetalLayer* layer)
     buildInstanceBuffer();
     buildTextures();
     buildGround();
+    buildTrampleMaps();
     
     // Initialize MSAA textures with initial layer size
     // Get drawable size from metal layer
@@ -126,14 +133,23 @@ Renderer::~Renderer()
     if (m_groundTexture) {
         delete m_groundTexture;
     }
-    if (m_capsulePSO) {
-        m_capsulePSO->release();
+    if (m_ballPSO) {
+        m_ballPSO->release();
     }
-    if (m_capsuleVertexBuffer) {
-        m_capsuleVertexBuffer->release();
+    if (m_trampleMapA) {
+        m_trampleMapA->release();
     }
-    if (m_capsuleIndexBuffer) {
-        m_capsuleIndexBuffer->release();
+    if (m_trampleMapB) {
+        m_trampleMapB->release();
+    }
+    if (m_trampleComputePSO) {
+        m_trampleComputePSO->release();
+    }
+    if (m_ballVertexBuffer) {
+        m_ballVertexBuffer->release();
+    }
+    if (m_ballIndexBuffer) {
+        m_ballIndexBuffer->release();
     }
 }
 
@@ -239,17 +255,88 @@ void Renderer::draw()
         float radius = 3.0f;
         float speed = 1.0f;
         float time = uniforms.time;
-        uniforms.interactorPos = simd::make_float3(
+        simd::float3 currentInteractorPos = simd::make_float3(
             sin(time * speed) * radius,
-            0.5f,
+            0.0f,  // Ball Y position: ground is at -0.5f, ball radius is 0.5f, so center at 0.0f to touch ground
             cos(time * speed) * radius
         );
+        uniforms.interactorPos = currentInteractorPos;
         uniforms.interactorRadius = 1.0f;
         uniforms.interactorStrength = 2.0f;
+        
+        // Trample map system: Set ball position and radius
+        uniforms.ballWorldPos = currentInteractorPos;
+        uniforms.ballRadius = uniforms.interactorRadius;
+        
+        // Ground bounds for world->UV mapping (matches SCENE_SIZE)
+        uniforms.groundMinXZ = simd::make_float2(-SCENE_SIZE, -SCENE_SIZE);
+        uniforms.groundMaxXZ = simd::make_float2(SCENE_SIZE, SCENE_SIZE);
+        
+        // Time step (delta time) - approximate from frame time
+        // For now, use a fixed small value (will be improved with proper delta time tracking)
+        static float lastTime = 0.0f;
+        float currentTime = uniforms.time;
+        uniforms.dt = (currentTime - lastTime > 0.0f) ? (currentTime - lastTime) : (1.0f / 60.0f); // Default to 60fps if no delta
+        lastTime = currentTime;
+        
+        // Trample decay rate (default: 0.35 for ~3 seconds recovery)
+        uniforms.trampleDecayRate = 0.35f;
+        
+        // Debug visualization toggle
+        uniforms.showTrampleMap = m_showTrampleMap ? 1.0f : 0.0f;
+        
+        // Soft interaction parameters (Ghibli-like)
+        uniforms.flattenBandWidth = uniforms.ballRadius * 0.35f;
+        uniforms.flattenStrength = 0.75f;
+        uniforms.contactShadowRadius = uniforms.ballRadius * 0.90f;
+        uniforms.contactShadowStrength = 0.55f;
         
         // Copy uniforms to buffer
         void* uniformContents = m_uniformBuffer->contents();
         memcpy(uniformContents, &uniforms, sizeof(Uniforms));
+    }
+    
+    // ============================================================
+    // UPDATE TRAMPLE MAP (Compute Shader)
+    // ============================================================
+    if (m_trampleComputePSO && m_trampleMapA && m_trampleMapB) {
+        // Create compute command encoder
+        MTL::ComputeCommandEncoder* computeEncoder = commandBuffer->computeCommandEncoder();
+        
+        if (computeEncoder) {
+            // Set compute pipeline
+            computeEncoder->setComputePipelineState(m_trampleComputePSO);
+            
+            // Determine input and output textures (ping-pong)
+            MTL::Texture* inputTexture = m_trampleMapSwap ? m_trampleMapB : m_trampleMapA;
+            MTL::Texture* outputTexture = m_trampleMapSwap ? m_trampleMapA : m_trampleMapB;
+            
+            // Set textures
+            computeEncoder->setTexture(inputTexture, 0);  // Input (read)
+            computeEncoder->setTexture(outputTexture, 1); // Output (write)
+            
+            // Set uniform buffer
+            computeEncoder->setBuffer(m_uniformBuffer, 0, 0);
+            
+            // Calculate threadgroup size (assuming 16x16 threads per group)
+            const int threadGroupSize = 16;
+            MTL::Size threadgroupSize = MTL::Size(threadGroupSize, threadGroupSize, 1);
+            MTL::Size threadgroupCount = MTL::Size(
+                (inputTexture->width() + threadGroupSize - 1) / threadGroupSize,
+                (inputTexture->height() + threadGroupSize - 1) / threadGroupSize,
+                1
+            );
+            
+            // Dispatch compute shader
+            computeEncoder->dispatchThreadgroups(threadgroupCount, threadgroupSize);
+            
+            // End encoding
+            computeEncoder->endEncoding();
+            computeEncoder->release();
+            
+            // Swap ping-pong buffers
+            m_trampleMapSwap = !m_trampleMapSwap;
+        }
     }
     
     // Encode & Commit: Use this manually created descriptor to create the encoder, draw primitives, present the drawable, and commit
@@ -296,7 +383,13 @@ void Renderer::draw()
     renderEncoder->setVertexBuffer(m_uniformBuffer, 0, BufferIndexUniforms);
     
     // Explicit Binding: Bind Grass Texture
-    renderEncoder->setFragmentTexture(m_texture->getMetalTexture(), 0);
+    renderEncoder->setFragmentTexture(m_texture->getMetalTexture(), TextureIndexGrass);
+    
+    // Bind Trample Map to grass shader
+    MTL::Texture* currentTrampleMap = m_trampleMapSwap ? m_trampleMapA : m_trampleMapB;
+    if (currentTrampleMap) {
+        renderEncoder->setFragmentTexture(currentTrampleMap, TextureIndexTrampleMap);
+    }
     
     // Draw Instanced Grass
     renderEncoder->drawIndexedPrimitives(
@@ -307,27 +400,27 @@ void Renderer::draw()
         NS::UInteger(0),
         NS::UInteger(20000));
     
-    // Pass 3: Capsule (Interactor Visualization)
-    if (m_capsulePSO && m_capsuleVertexBuffer && m_capsuleIndexBuffer && m_capsuleIndexCount > 0) {
-        // Set capsule pipeline state
-        renderEncoder->setRenderPipelineState(m_capsulePSO);
+    // Pass 3: Ball (Interactor Visualization)
+    if (m_ballPSO && m_ballVertexBuffer && m_ballIndexBuffer && m_ballIndexCount > 0) {
+        // Set ball pipeline state
+        renderEncoder->setRenderPipelineState(m_ballPSO);
         
         // Set depth stencil state (standard read/write)
         renderEncoder->setDepthStencilState(m_depthStencilState);
         
-        // Set vertex buffer (capsule mesh)
-        renderEncoder->setVertexBuffer(m_capsuleVertexBuffer, 0, BufferIndexMeshPositions);
+        // Set vertex buffer (ball mesh)
+        renderEncoder->setVertexBuffer(m_ballVertexBuffer, 0, BufferIndexMeshPositions);
         
         // Set uniform buffer (to pass interactorPos)
         renderEncoder->setVertexBuffer(m_uniformBuffer, 0, BufferIndexUniforms);
         renderEncoder->setFragmentBuffer(m_uniformBuffer, 0, BufferIndexUniforms);
         
-        // Draw capsule
+        // Draw ball
         renderEncoder->drawIndexedPrimitives(
             MTL::PrimitiveTypeTriangle,
-            NS::UInteger(m_capsuleIndexCount),
+            NS::UInteger(m_ballIndexCount),
             MTL::IndexTypeUInt16,
-            m_capsuleIndexBuffer,
+            m_ballIndexBuffer,
             NS::UInteger(0));
     }
     
@@ -463,54 +556,54 @@ void Renderer::buildShaders()
     groundVertexFunctionName->release();
     groundFragmentFunctionName->release();
     
-    // Load Capsule Shaders
-    NS::String* capsuleVertexFunctionName = NS::String::string("vertexCapsule", NS::ASCIIStringEncoding);
-    NS::String* capsuleFragmentFunctionName = NS::String::string("fragmentCapsule", NS::ASCIIStringEncoding);
+    // Load Ball Shaders
+    NS::String* ballVertexFunctionName = NS::String::string("vertexBall", NS::ASCIIStringEncoding);
+    NS::String* ballFragmentFunctionName = NS::String::string("fragmentBall", NS::ASCIIStringEncoding);
     
-    MTL::Function* capsuleVertexFunction = library->newFunction(capsuleVertexFunctionName);
-    MTL::Function* capsuleFragmentFunction = library->newFunction(capsuleFragmentFunctionName);
+    MTL::Function* ballVertexFunction = library->newFunction(ballVertexFunctionName);
+    MTL::Function* ballFragmentFunction = library->newFunction(ballFragmentFunctionName);
     
-    if (!capsuleVertexFunction || !capsuleFragmentFunction) {
-        std::cerr << "Failed to load capsule shader functions" << std::endl;
-        if (capsuleVertexFunction) capsuleVertexFunction->release();
-        if (capsuleFragmentFunction) capsuleFragmentFunction->release();
-        capsuleVertexFunctionName->release();
-        capsuleFragmentFunctionName->release();
+    if (!ballVertexFunction || !ballFragmentFunction) {
+        std::cerr << "Failed to load ball shader functions" << std::endl;
+        if (ballVertexFunction) ballVertexFunction->release();
+        if (ballFragmentFunction) ballFragmentFunction->release();
+        ballVertexFunctionName->release();
+        ballFragmentFunctionName->release();
     } else {
-        // Create capsule pipeline descriptor
-        MTL::RenderPipelineDescriptor* capsulePipelineDescriptor = MTL::RenderPipelineDescriptor::alloc()->init();
-        capsulePipelineDescriptor->setVertexFunction(capsuleVertexFunction);
-        capsulePipelineDescriptor->setFragmentFunction(capsuleFragmentFunction);
+        // Create ball pipeline descriptor
+        MTL::RenderPipelineDescriptor* ballPipelineDescriptor = MTL::RenderPipelineDescriptor::alloc()->init();
+        ballPipelineDescriptor->setVertexFunction(ballVertexFunction);
+        ballPipelineDescriptor->setFragmentFunction(ballFragmentFunction);
         
         // Set color attachment pixel format
-        MTL::RenderPipelineColorAttachmentDescriptor* capsuleColorAttachment = capsulePipelineDescriptor->colorAttachments()->object(0);
-        capsuleColorAttachment->setPixelFormat(MTL::PixelFormatBGRA8Unorm);
+        MTL::RenderPipelineColorAttachmentDescriptor* ballColorAttachment = ballPipelineDescriptor->colorAttachments()->object(0);
+        ballColorAttachment->setPixelFormat(MTL::PixelFormatBGRA8Unorm);
         
         // Set depth pixel format
-        capsulePipelineDescriptor->setDepthAttachmentPixelFormat(MTL::PixelFormatDepth32Float);
+        ballPipelineDescriptor->setDepthAttachmentPixelFormat(MTL::PixelFormatDepth32Float);
         
         // Enable 4x MSAA for consistency
-        capsulePipelineDescriptor->setSampleCount(4);
+        ballPipelineDescriptor->setSampleCount(4);
         
-        // Create m_capsulePSO
-        m_capsulePSO = m_device->newRenderPipelineState(capsulePipelineDescriptor, &error);
+        // Create m_ballPSO
+        m_ballPSO = m_device->newRenderPipelineState(ballPipelineDescriptor, &error);
         
-        if (!m_capsulePSO) {
+        if (!m_ballPSO) {
             if (error) {
                 NS::String* errorString = error->localizedDescription();
-                std::cerr << "Failed to create capsule render pipeline state: " << errorString->utf8String() << std::endl;
+                std::cerr << "Failed to create ball render pipeline state: " << errorString->utf8String() << std::endl;
                 errorString->release();
             } else {
-                std::cerr << "Failed to create capsule render pipeline state" << std::endl;
+                std::cerr << "Failed to create ball render pipeline state" << std::endl;
             }
         }
         
-        // Release capsule shader resources
-        capsuleVertexFunction->release();
-        capsuleFragmentFunction->release();
-        capsulePipelineDescriptor->release();
-        capsuleVertexFunctionName->release();
-        capsuleFragmentFunctionName->release();
+        // Release ball shader resources
+        ballVertexFunction->release();
+        ballFragmentFunction->release();
+        ballPipelineDescriptor->release();
+        ballVertexFunctionName->release();
+        ballFragmentFunctionName->release();
     }
     
     // Release library and pipeline descriptor
@@ -535,6 +628,38 @@ void Renderer::buildShaders()
     
     // Release descriptor
     depthStencilDescriptor->release();
+    
+    // Load Trample Compute Shader
+    MTL::Library* computeLibrary = m_device->newDefaultLibrary();
+    if (computeLibrary) {
+        NS::String* computeFunctionName = NS::String::string("updateTrampleMap", NS::ASCIIStringEncoding);
+        MTL::Function* computeFunction = computeLibrary->newFunction(computeFunctionName);
+        
+        if (computeFunction) {
+            // Create compute pipeline
+            NS::Error* computeError = nullptr;
+            m_trampleComputePSO = m_device->newComputePipelineState(computeFunction, &computeError);
+            
+            if (!m_trampleComputePSO) {
+                if (computeError) {
+                    NS::String* errorString = computeError->localizedDescription();
+                    std::cerr << "Failed to create trample compute pipeline: " << errorString->utf8String() << std::endl;
+                    errorString->release();
+                } else {
+                    std::cerr << "Failed to create trample compute pipeline" << std::endl;
+                }
+            }
+            
+            computeFunction->release();
+        } else {
+            std::cerr << "Failed to load updateTrampleMap function" << std::endl;
+        }
+        
+        computeFunctionName->release();
+        computeLibrary->release();
+    } else {
+        std::cerr << "Failed to load default library for compute shader" << std::endl;
+    }
 }
 
 void Renderer::buildBuffers()
@@ -640,32 +765,32 @@ void Renderer::buildBuffers()
         std::cerr << "Failed to create uniform buffer" << std::endl;
     }
     
-    // Generate capsule mesh
-    std::vector<Vertex> capsuleVertices;
-    std::vector<uint16_t> capsuleIndices;
-    createCapsuleMesh(0.5f, 1.0f, 128, 32, capsuleVertices, capsuleIndices);
+    // Generate ball (sphere) mesh
+    std::vector<Vertex> ballVertices;
+    std::vector<uint16_t> ballIndices;
+    createSphereMesh(0.5f, 64, 32, ballVertices, ballIndices);
     
-    // Create capsule vertex buffer
-    size_t capsuleVertexDataSize = capsuleVertices.size() * sizeof(Vertex);
-    m_capsuleVertexBuffer = m_device->newBuffer(capsuleVertexDataSize, MTL::ResourceStorageModeShared);
+    // Create ball vertex buffer
+    size_t ballVertexDataSize = ballVertices.size() * sizeof(Vertex);
+    m_ballVertexBuffer = m_device->newBuffer(ballVertexDataSize, MTL::ResourceStorageModeShared);
     
-    if (m_capsuleVertexBuffer) {
-        void* capsuleBufferContents = m_capsuleVertexBuffer->contents();
-        memcpy(capsuleBufferContents, capsuleVertices.data(), capsuleVertexDataSize);
+    if (m_ballVertexBuffer) {
+        void* ballBufferContents = m_ballVertexBuffer->contents();
+        memcpy(ballBufferContents, ballVertices.data(), ballVertexDataSize);
     } else {
-        std::cerr << "Failed to create capsule vertex buffer" << std::endl;
+        std::cerr << "Failed to create ball vertex buffer" << std::endl;
     }
     
-    // Create capsule index buffer
-    m_capsuleIndexCount = capsuleIndices.size();
-    size_t capsuleIndexDataSize = capsuleIndices.size() * sizeof(uint16_t);
-    m_capsuleIndexBuffer = m_device->newBuffer(capsuleIndexDataSize, MTL::ResourceStorageModeShared);
+    // Create ball index buffer
+    m_ballIndexCount = ballIndices.size();
+    size_t ballIndexDataSize = ballIndices.size() * sizeof(uint16_t);
+    m_ballIndexBuffer = m_device->newBuffer(ballIndexDataSize, MTL::ResourceStorageModeShared);
     
-    if (m_capsuleIndexBuffer) {
-        void* capsuleIndexBufferContents = m_capsuleIndexBuffer->contents();
-        memcpy(capsuleIndexBufferContents, capsuleIndices.data(), capsuleIndexDataSize);
+    if (m_ballIndexBuffer) {
+        void* ballIndexBufferContents = m_ballIndexBuffer->contents();
+        memcpy(ballIndexBufferContents, ballIndices.data(), ballIndexDataSize);
     } else {
-        std::cerr << "Failed to create capsule index buffer" << std::endl;
+        std::cerr << "Failed to create ball index buffer" << std::endl;
     }
 }
 
@@ -860,16 +985,41 @@ void Renderer::buildGround()
     }
 }
 
-void Renderer::createCapsuleMesh(float radius, float midHeight, int radialSegments, int verticalSegments,
+void Renderer::buildTrampleMaps()
+{
+    // Create 1024x1024 single-channel textures for ping-pong trample map
+    const int trampleMapSize = 1024;
+    
+    MTL::TextureDescriptor* textureDesc = MTL::TextureDescriptor::alloc()->init();
+    textureDesc->setWidth(trampleMapSize);
+    textureDesc->setHeight(trampleMapSize);
+    textureDesc->setPixelFormat(MTL::PixelFormatR16Float);
+    textureDesc->setTextureType(MTL::TextureType2D);
+    textureDesc->setUsage(MTL::TextureUsageShaderRead | MTL::TextureUsageShaderWrite);
+    textureDesc->setStorageMode(MTL::StorageModePrivate);
+    
+    // Create ping-pong textures
+    m_trampleMapA = m_device->newTexture(textureDesc);
+    m_trampleMapB = m_device->newTexture(textureDesc);
+    
+    if (!m_trampleMapA || !m_trampleMapB) {
+        std::cerr << "Failed to create trample map textures" << std::endl;
+    }
+    
+    // Initialize both textures to zero (no trampling initially)
+    // We'll need to clear them using a compute shader or render pass
+    // For now, they start at zero by default
+    
+    textureDesc->release();
+}
+
+void Renderer::createSphereMesh(float radius, int radialSegments, int verticalSegments,
                                  std::vector<Vertex>& vertices, std::vector<uint16_t>& indices)
 {
-    // Stretched Sphere Technique: Generate a perfect sphere, then stretch the middle section
-    // This ensures seamless continuity with smooth normals across the entire surface
+    // Generate a perfect sphere mesh
     
     vertices.clear();
     indices.clear();
-    
-    const float halfHeight = midHeight * 0.5f;
     
     // Generate sphere vertices
     for (int ring = 0; ring <= verticalSegments; ++ring) {
@@ -899,16 +1049,8 @@ void Renderer::createCapsuleMesh(float radius, float midHeight, int radialSegmen
             float y = sphereY * radius;
             float z = sphereZ * radius;
             
-            // Stretch the middle section: if y > 0, shift up; if y < 0, shift down
-            if (y > 0.0f) {
-                y += halfHeight;
-            } else {
-                y -= halfHeight;
-            }
-            
             Vertex v;
             v.position = {x, y, z};
-            // CRUCIAL: Keep the original sphere normal - this ensures smooth lighting
             v.normal = sphereNormal;
             v.texcoord = {static_cast<float>(seg) / radialSegments, static_cast<float>(ring) / verticalSegments};
             vertices.push_back(v);
@@ -958,6 +1100,15 @@ void Renderer::update(GLFWwindow* window, float deltaTime)
     if (glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS) {
         m_camera->processKeyboard('D', deltaTime);
     }
+    
+    // Toggle trample map visualization (T key)
+    bool currentTKeyState = (glfwGetKey(window, GLFW_KEY_T) == GLFW_PRESS);
+    if (currentTKeyState && !m_prevTKeyState) {
+        // T key was just pressed (toggle)
+        m_showTrampleMap = !m_showTrampleMap;
+        std::cout << "Trample map visualization: " << (m_showTrampleMap ? "ON" : "OFF") << std::endl;
+    }
+    m_prevTKeyState = currentTKeyState;
     
     // Handle mouse movement
     double xpos, ypos;

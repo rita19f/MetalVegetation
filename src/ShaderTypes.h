@@ -24,6 +24,11 @@ enum BufferIndices {
     BufferIndexUniforms      = 2
 };
 
+enum TextureIndices {
+    TextureIndexGrass = 0,
+    TextureIndexTrampleMap = 1
+};
+
 // 顶点结构体 - Alignment safe between C++ and Metal
 struct Vertex {
     float3 position;
@@ -45,7 +50,22 @@ struct Uniforms {
     float3 cameraPosition; // 相机位置，用于圆柱形广告牌
     float3 sunDirection; // 太阳方向，用于光照计算
     float3 sunColor; // 太阳颜色
-    float3 interactorPos; // The world position of the object crushing the grass
-    float interactorRadius; // How wide the crushing effect is (e.g., 2.0)
-    float interactorStrength; // How hard it pushes (e.g., 1.0)
+    float3 interactorPos; // The world position of the object crushing the grass (legacy, kept for capsule rendering)
+    float interactorRadius; // How wide the crushing effect is (e.g., 2.0) (legacy, kept for capsule rendering)
+    float interactorStrength; // How hard it pushes (e.g., 1.0) (legacy, kept for compatibility)
+    
+    // Trample map system
+    float3 ballWorldPos; // Ball center position (world space)
+    float ballRadius; // Ball radius for trample map
+    float2 groundMinXZ; // Ground bounds min (X, Z) for world->UV mapping
+    float2 groundMaxXZ; // Ground bounds max (X, Z) for world->UV mapping
+    float dt; // Time step for trample decay
+    float trampleDecayRate; // Decay rate (default: 0.35)
+    float showTrampleMap; // Debug flag: 1.0 to visualize trample map, 0.0 for normal rendering
+    
+    // Soft interaction parameters (Ghibli-like)
+    float flattenBandWidth; // Width of flatten ring around ball
+    float flattenStrength; // Strength of flatten compression (0-1)
+    float contactShadowRadius; // Radius of contact shadow effect
+    float contactShadowStrength; // Strength of contact shadow darkening (0-1)
 };

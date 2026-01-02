@@ -224,71 +224,38 @@ vertex RasterizerData vertexMain(
     // ============================================================
     
     // ============================================================
-    // [START] ADVANCED PHYSICS: CRUSH & BEND TRAMPLING EFFECT
+    // SOFT FLATTEN RING (Ghibli-like compression, no sideways bending)
     // ============================================================
-    // Calculate distance from grass instance base to interactor
-    float3 interactorPos = uniforms.interactorPos;
-    float3 instancePos = instanceWorldPos; // Base position of this grass blade
-    float3 toInteractor = instancePos - interactorPos;
-    float dist = length(toInteractor);
+    // 2.1 Compute distance to the ball in XZ
+    float2 P = finalWorldPos.xz;
+    float2 ballCenterXZ = uniforms.ballWorldPos.xz;
+    float d = length(P - ballCenterXZ);
     
-    // Calculate influence factor: 1.0 at center (fully crushed), 0.0 at edge
-    float pushRadius = uniforms.interactorRadius;
-    // smoothstep(pushRadius, pushRadius * 0.4, dist) gives:
-    // - 1.0 when dist <= pushRadius * 0.4 (center, fully affected)
-    // - 0.0 when dist >= pushRadius (edge, unaffected)
-    // - Smooth transition in between
-    float influence = 1.0 - smoothstep(pushRadius * 0.4, pushRadius, dist);
+    // 2.2 Ring mask (narrow, smooth falloff)
+    float ring = smoothstep(uniforms.ballRadius + uniforms.flattenBandWidth, 
+                           uniforms.ballRadius, d);
     
-    // Store influence for fragment shader (for shadow darkening)
-    out.influence = influence;
+    // 2.3 Height weighting (tip > base)
+    // Use existing t (0=Root, 1=Tip) for height factor
+    float heightW = saturate(t); // Already 0-1
+    heightW = heightW * heightW; // Quadratic: stronger tip weighting
     
-    // Apply deformation only if there's any influence
-    if (influence > 0.001) {
-        // Calculate push direction (outward from interactor)
-        float3 pushDir = normalize(toInteractor);
-        // Handle edge case where toInteractor is zero
-        if (length(pushDir) < 0.001) {
-            pushDir = float3(1.0, 0.0, 0.0); // Default direction
-        }
+    // 2.4 Apply flatten by compressing towards root
+    if (ring > 0.001) {
+        // Compute root world position for this blade
+        float3 rootWorldPos = instanceWorldPos;
         
-        // Get local position relative to instance base
-        float3 localPos = finalWorldPos - instancePos;
-        float originalHeight = localPos.y; // Store original height
-        
-        // ============================================================
-        // DEFORMATION A: VERTICAL CRUSH (The Weight)
-        // ============================================================
-        // Grass under the capsule should be flattened
-        // Squash height down to 10% at center, full height at edge
-        float crushFactor = mix(1.0, 0.1, influence);
-        localPos.y *= crushFactor;
-        
-        // ============================================================
-        // DEFORMATION B: RADIAL BEND (The Curve)
-        // ============================================================
-        // Push grass outward, but apply exponentially based on height
-        // Tip bends much more than root (simulates natural bending)
-        // t = 1.0 at tip, 0.0 at root
-        float bendFactor = influence * (t * t); // Quadratic: tip bends much more
-        
-        // Push tip outward strongly, root stays fixed
-        float2 pushXZ = pushDir.xz * bendFactor * 2.0;
-        localPos.x += pushXZ.x;
-        localPos.z += pushXZ.y;
-        
-        // Update final world position
-        finalWorldPos = instancePos + localPos;
-        
-        // Ensure grass doesn't go below ground level
-        finalWorldPos.y = max(instancePos.y, finalWorldPos.y);
-    } else {
-        // No influence, set to 0.0
-        out.influence = 0.0;
+        // Apply flatten compression (no sideways bending)
+        float flatten = ring * heightW * uniforms.flattenStrength;
+        finalWorldPos = rootWorldPos + (finalWorldPos - rootWorldPos) * (1.0 - flatten);
     }
+    
     // ============================================================
-    // [END] ADVANCED PHYSICS: CRUSH & BEND TRAMPLING EFFECT
+    // OLD BEND-ASIDE INTERACTION REMOVED
+    // Trample map system now handles grass clipping in fragment shader
     // ============================================================
+    // Set influence to 0.0 (no longer used for vertex deformation)
+    out.influence = 0.0;
     
     // Pass Output
     // 高光只响应正向强风 (mainSwell)，忽略回弹阶段
@@ -312,11 +279,29 @@ vertex RasterizerData vertexMain(
 
 fragment float4 fragmentMain(
     RasterizerData in [[stage_in]],
-    texture2d<float> colorTexture [[texture(0)]],
+    texture2d<float> colorTexture [[texture(TextureIndexGrass)]],
+    texture2d<float> trampleMap [[texture(TextureIndexTrampleMap)]],
     constant Uniforms &uniforms [[buffer(BufferIndexUniforms)]]
 ) {
     // Define a constexpr sampler inside the shader function
     constexpr sampler textureSampler(mag_filter::linear, min_filter::linear, address::clamp_to_edge);
+    
+    // ============================================================================
+    // 0. TRAMPLE MAP: Hard clip grass where trampled
+    // ============================================================================
+    // Map world position to trample map UV
+    float2 worldXZ = in.worldPos.xz;
+    float2 trampleUV = (worldXZ - uniforms.groundMinXZ) / (uniforms.groundMaxXZ - uniforms.groundMinXZ);
+    
+    // Sample trample map
+    constexpr sampler trampleSampler(mag_filter::linear, min_filter::linear, address::clamp_to_edge);
+    float trample = trampleMap.sample(trampleSampler, trampleUV).r;
+    
+    // Hard clip: if trample > 0.5, discard fragment (grass disappears)
+    const float killThreshold = 0.5;
+    if (trample > killThreshold) {
+        discard_fragment();
+    }
     
     // ============================================================================
     // 1. Analytic Antialiasing: Smooth alpha edges using derivatives
@@ -458,16 +443,22 @@ fragment float4 fragmentMain(
     finalColor *= aoFactor;
     
     // ============================================================================
-    // 8.5. GROUNDING SHADOWS (Crushed Grass Darkening)
+    // 8.5. CONTACT SHADOW (Subtle darkening near ball)
     // ============================================================================
-    // Grass that is crushed (high influence) must be darker to simulate
-    // self-shadowing and contact shadows from being flattened
-    // Darken by 50% at the crush center (influence = 1.0)
-    float crushShadow = mix(1.0, 0.5, in.influence);
-    finalColor *= crushShadow;
+    // 3.1 Compute distance (same as vertex shader)
+    float2 P = in.worldPos.xz;
+    float2 ballCenterXZ = uniforms.ballWorldPos.xz;
+    float d = length(P - ballCenterXZ);
+    
+    // 3.2 Contact shadow mask (localized, smooth falloff)
+    float shadow = smoothstep(uniforms.contactShadowRadius, 0.0, d);
+    shadow *= uniforms.contactShadowStrength;
+    
+    // Apply contact shadow
+    finalColor.rgb *= (1.0 - shadow);
     
     // ============================================================================
-    // 9. FAKE BLOB SHADOW (Capsule Grounding)
+    // 9. FAKE BLOB SHADOW (Ball Grounding)
     // ============================================================================
     // Calculate horizontal distance from grass to interactor (ignore height)
     float2 grassPosXZ = in.worldPos.xz;
@@ -511,26 +502,35 @@ fragment float4 fragmentMain(
     // Mix the grass color with the fog color based on distance
     finalColor = mix(finalColor, fogColor, fogFactor);
     
+    // ============================================================================
+    // DEBUG: Visualize trample map (when showTrampleMap > 0.5)
+    // ============================================================================
+    if (uniforms.showTrampleMap > 0.5) {
+        // Tint grass by trample value: red where trampled, normal color elsewhere
+        float3 trampleTint = mix(float3(1.0, 1.0, 1.0), float3(1.0, 0.0, 0.0), trample);
+        finalColor *= trampleTint;
+    }
+    
     // Return final color with smoothed opacity for Alpha-to-Coverage
     return float4(finalColor, opacity);
 }
 
 // ============================================================================
-// CAPSULE SHADERS (Interactor Visualization)
+// BALL SHADERS (Interactor Visualization)
 // ============================================================================
 
-struct CapsuleRasterizerData {
+struct BallRasterizerData {
     float4 position [[position]];
     float3 worldPos;
     float3 normal;
 };
 
-vertex CapsuleRasterizerData vertexCapsule(
+vertex BallRasterizerData vertexBall(
     uint vertexID [[vertex_id]],
     constant Vertex *vertices [[buffer(BufferIndexMeshPositions)]],
     constant Uniforms &uniforms [[buffer(BufferIndexUniforms)]]
 ) {
-    CapsuleRasterizerData out;
+    BallRasterizerData out;
     
     // Get vertex position in local space
     float3 localPos = vertices[vertexID].position;
@@ -549,8 +549,8 @@ vertex CapsuleRasterizerData vertexCapsule(
     return out;
 }
 
-fragment float4 fragmentCapsule(
-    CapsuleRasterizerData in [[stage_in]],
+fragment float4 fragmentBall(
+    BallRasterizerData in [[stage_in]],
     constant Uniforms &uniforms [[buffer(BufferIndexUniforms)]]
 ) {
     // Blinn-Phong Lighting for Shiny Plastic Material
