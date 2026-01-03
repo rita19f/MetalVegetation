@@ -124,8 +124,10 @@ if(APPLE)
     # Compile Metal shaders
     set(METAL_SHADER_SOURCE_GRASS ${CMAKE_SOURCE_DIR}/src/Shaders.metal)
     set(METAL_SHADER_SOURCE_GROUND ${CMAKE_SOURCE_DIR}/src/GroundShaders.metal)
+    set(METAL_SHADER_SOURCE_SKY ${CMAKE_SOURCE_DIR}/src/SkyShaders.metal)
     set(METAL_SHADER_IR_GRASS ${CMAKE_BINARY_DIR}/Shaders.air)
     set(METAL_SHADER_IR_GROUND ${CMAKE_BINARY_DIR}/GroundShaders.air)
+    set(METAL_SHADER_IR_SKY ${CMAKE_BINARY_DIR}/SkyShaders.air)
     set(METAL_SHADER_LIB ${CMAKE_BINARY_DIR}/default.metallib)
     
     # Compile Grass Metal shader to AIR (Apple Intermediate Representation)
@@ -144,11 +146,19 @@ if(APPLE)
         COMMENT "Compiling Ground Metal shader to AIR"
     )
     
+    # Compile Sky Metal shader to AIR (Apple Intermediate Representation)
+    add_custom_command(
+        OUTPUT ${METAL_SHADER_IR_SKY}
+        COMMAND xcrun -sdk macosx metal -c ${METAL_SHADER_SOURCE_SKY} -o ${METAL_SHADER_IR_SKY} -I${CMAKE_SOURCE_DIR}/src
+        DEPENDS ${METAL_SHADER_SOURCE_SKY} ${CMAKE_SOURCE_DIR}/src/ShaderTypes.h
+        COMMENT "Compiling Sky Metal shader to AIR"
+    )
+    
     # Link AIR files to metallib
     add_custom_command(
         OUTPUT ${METAL_SHADER_LIB}
-        COMMAND xcrun -sdk macosx metallib ${METAL_SHADER_IR_GRASS} ${METAL_SHADER_IR_GROUND} -o ${METAL_SHADER_LIB}
-        DEPENDS ${METAL_SHADER_IR_GRASS} ${METAL_SHADER_IR_GROUND}
+        COMMAND xcrun -sdk macosx metallib ${METAL_SHADER_IR_GRASS} ${METAL_SHADER_IR_GROUND} ${METAL_SHADER_IR_SKY} -o ${METAL_SHADER_LIB}
+        DEPENDS ${METAL_SHADER_IR_GRASS} ${METAL_SHADER_IR_GROUND} ${METAL_SHADER_IR_SKY}
         COMMENT "Linking Metal shader library"
     )
     

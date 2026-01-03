@@ -21,24 +21,26 @@ private:
     MTL::Device* m_device;
     MTL::CommandQueue* m_commandQueue;
     CA::MetalLayer* m_metalLayer; 
-    MTL::RenderPipelineState* m_pso; // 管线状态 (grass)
-    MTL::RenderPipelineState* m_groundPSO; // 地面管线状态
+    MTL::RenderPipelineState* m_pso; // Grass pipeline state
+    MTL::RenderPipelineState* m_groundPSO; // Ground pipeline state
     MTL::RenderPipelineState* m_ballPSO; // Ball pipeline state
-    MTL::Buffer* m_vertexBuffer;     // 存放顶点数据
-    MTL::Buffer* m_indexBuffer;      // 存放索引数据
-    MTL::Buffer* m_instanceBuffer;   // 存放实例数据
-    MTL::Buffer* m_uniformBuffer;    // 存放uniform数据
-    MTL::Buffer* m_groundVertexBuffer; // 存放地面顶点数据
-    MTL::Buffer* m_ballVertexBuffer; // Ball vertex data
-    MTL::Buffer* m_ballIndexBuffer;  // Ball index data
+    MTL::RenderPipelineState* m_skyPSO; // Sky pipeline state
+    MTL::Buffer* m_vertexBuffer;     // Vertex data buffer
+    MTL::Buffer* m_indexBuffer;      // Index data buffer
+    MTL::Buffer* m_instanceBuffer;   // Instance data buffer
+    MTL::Buffer* m_uniformBuffer;    // Uniform data buffer
+    MTL::Buffer* m_groundVertexBuffer; // Ground vertex data buffer
+    MTL::Buffer* m_ballVertexBuffer; // Ball vertex data buffer
+    MTL::Buffer* m_ballIndexBuffer;  // Ball index data buffer
     NS::UInteger m_ballIndexCount;   // Ball index count
     MTL::DepthStencilState* m_depthStencilState;
-    MTL::Texture* m_depthTexture;    // 深度纹理 (resolve target)
+    MTL::DepthStencilState* m_skyDepthStencilState; // Sky depth state (always pass, no write)
+    MTL::Texture* m_depthTexture;    // Depth texture (resolve target)
     MTL::Texture* m_msaaColorTexture; // MSAA color render target
     MTL::Texture* m_msaaDepthTexture; // MSAA depth render target
-    Texture* m_texture;               // 纹理 (grass)
-    Texture* m_groundTexture;         // 地面纹理
-    Camera* m_camera;                 // 相机
+    Texture* m_texture;               // Grass texture
+    Texture* m_groundTexture;         // Ground texture
+    Camera* m_camera;                 // Camera
     
     // Trample map system
     MTL::Texture* m_trampleMapA;      // Ping-pong texture A
@@ -54,11 +56,11 @@ private:
     float m_lastY;
     
     void buildShaders();
-    void buildBuffers(); // 新增：用来创建顶点数据
-    void buildInstanceBuffer(); // 创建实例缓冲区
-    void buildTextures(); // 创建纹理
-    void buildGround(); // 创建地面
-    void buildTrampleMaps(); // 创建trample map纹理
+    void buildBuffers(); // Create vertex data
+    void buildInstanceBuffer(); // Create instance buffer
+    void buildTextures(); // Create textures
+    void buildGround(); // Create ground mesh
+    void buildTrampleMaps(); // Create trample map textures
     void createSphereMesh(float radius, int radialSegments, int verticalSegments,
                           std::vector<Vertex>& vertices, std::vector<uint16_t>& indices);
 };

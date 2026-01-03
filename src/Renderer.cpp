@@ -46,6 +46,7 @@ Renderer::Renderer(MTL::Device* device, CA::MetalLayer* layer)
     , m_pso(nullptr)
     , m_groundPSO(nullptr)
     , m_ballPSO(nullptr)
+    , m_skyPSO(nullptr)
     , m_vertexBuffer(nullptr)
     , m_indexBuffer(nullptr)
     , m_instanceBuffer(nullptr)
@@ -55,6 +56,7 @@ Renderer::Renderer(MTL::Device* device, CA::MetalLayer* layer)
     , m_ballIndexBuffer(nullptr)
     , m_ballIndexCount(0)
     , m_depthStencilState(nullptr)
+    , m_skyDepthStencilState(nullptr)
     , m_depthTexture(nullptr)
     , m_msaaColorTexture(nullptr)
     , m_msaaDepthTexture(nullptr)
@@ -135,6 +137,12 @@ Renderer::~Renderer()
     }
     if (m_ballPSO) {
         m_ballPSO->release();
+    }
+    if (m_skyPSO) {
+        m_skyPSO->release();
+    }
+    if (m_skyDepthStencilState) {
+        m_skyDepthStencilState->release();
     }
     if (m_trampleMapA) {
         m_trampleMapA->release();
@@ -262,7 +270,6 @@ void Renderer::draw()
         );
         uniforms.interactorPos = currentInteractorPos;
         uniforms.interactorRadius = 1.0f;
-        uniforms.interactorStrength = 2.0f;
         
         // Trample map system: Set ball position and radius
         uniforms.ballWorldPos = currentInteractorPos;
@@ -343,7 +350,19 @@ void Renderer::draw()
     // Create a RenderCommandEncoder
     MTL::RenderCommandEncoder* renderEncoder = commandBuffer->renderCommandEncoder(renderPassDescriptor);
     
-    // Set depth stencil state (shared for all passes)
+    // Pass 0: Sky (fullscreen gradient, always behind everything)
+    if (m_skyPSO && m_skyDepthStencilState) {
+        // Set sky pipeline state
+        renderEncoder->setRenderPipelineState(m_skyPSO);
+        
+        // Set sky depth stencil state (always pass, no write)
+        renderEncoder->setDepthStencilState(m_skyDepthStencilState);
+        
+        // Draw fullscreen triangle (no vertex buffer needed)
+        renderEncoder->drawPrimitives(MTL::PrimitiveTypeTriangle, NS::UInteger(0), NS::UInteger(3));
+    }
+    
+    // Set depth stencil state (shared for all other passes)
     renderEncoder->setDepthStencilState(m_depthStencilState);
     
     // Pass 1: Ground
@@ -398,7 +417,7 @@ void Renderer::draw()
         MTL::IndexTypeUInt16,
         m_indexBuffer,
         NS::UInteger(0),
-        NS::UInteger(20000));
+        NS::UInteger(30000));
     
     // Pass 3: Ball (Interactor Visualization)
     if (m_ballPSO && m_ballVertexBuffer && m_ballIndexBuffer && m_ballIndexCount > 0) {
@@ -411,7 +430,7 @@ void Renderer::draw()
         // Set vertex buffer (ball mesh)
         renderEncoder->setVertexBuffer(m_ballVertexBuffer, 0, BufferIndexMeshPositions);
         
-        // Set uniform buffer (to pass interactorPos)
+        // Set uniform buffer
         renderEncoder->setVertexBuffer(m_uniformBuffer, 0, BufferIndexUniforms);
         renderEncoder->setFragmentBuffer(m_uniformBuffer, 0, BufferIndexUniforms);
         
@@ -606,6 +625,61 @@ void Renderer::buildShaders()
         ballFragmentFunctionName->release();
     }
     
+    // Load Sky Shaders
+    MTL::Library* skyLibrary = m_device->newDefaultLibrary();
+    if (skyLibrary) {
+        NS::String* skyVertexFunctionName = NS::String::string("vertexSkyFullscreen", NS::ASCIIStringEncoding);
+        NS::String* skyFragmentFunctionName = NS::String::string("fragmentSkyGradient", NS::ASCIIStringEncoding);
+        
+        MTL::Function* skyVertexFunction = skyLibrary->newFunction(skyVertexFunctionName);
+        MTL::Function* skyFragmentFunction = skyLibrary->newFunction(skyFragmentFunctionName);
+        
+        if (!skyVertexFunction || !skyFragmentFunction) {
+            std::cerr << "Failed to load sky shader functions" << std::endl;
+            if (skyVertexFunction) skyVertexFunction->release();
+            if (skyFragmentFunction) skyFragmentFunction->release();
+            skyVertexFunctionName->release();
+            skyFragmentFunctionName->release();
+        } else {
+            // Create sky pipeline descriptor
+            MTL::RenderPipelineDescriptor* skyPipelineDescriptor = MTL::RenderPipelineDescriptor::alloc()->init();
+            skyPipelineDescriptor->setVertexFunction(skyVertexFunction);
+            skyPipelineDescriptor->setFragmentFunction(skyFragmentFunction);
+            
+            // Set color attachment pixel format (match existing PSOs)
+            MTL::RenderPipelineColorAttachmentDescriptor* skyColorAttachment = skyPipelineDescriptor->colorAttachments()->object(0);
+            skyColorAttachment->setPixelFormat(MTL::PixelFormatBGRA8Unorm);
+            
+            // Set depth pixel format (same as others, but we'll disable depth test for sky)
+            skyPipelineDescriptor->setDepthAttachmentPixelFormat(MTL::PixelFormatDepth32Float);
+            
+            // No MSAA for sky (fullscreen triangle, no need)
+            skyPipelineDescriptor->setSampleCount(1);
+            
+            // Create m_skyPSO
+            m_skyPSO = m_device->newRenderPipelineState(skyPipelineDescriptor, &error);
+            
+            if (!m_skyPSO) {
+                if (error) {
+                    NS::String* errorString = error->localizedDescription();
+                    std::cerr << "Failed to create sky render pipeline state: " << errorString->utf8String() << std::endl;
+                    errorString->release();
+                } else {
+                    std::cerr << "Failed to create sky render pipeline state" << std::endl;
+                }
+            }
+            
+            // Release sky shader resources
+            skyVertexFunction->release();
+            skyFragmentFunction->release();
+            skyPipelineDescriptor->release();
+            skyVertexFunctionName->release();
+            skyFragmentFunctionName->release();
+        }
+        
+        skyLibrary->release();
+    }
+    
     // Release library and pipeline descriptor
     library->release();
     pipelineDescriptor->release();
@@ -628,6 +702,19 @@ void Renderer::buildShaders()
     
     // Release descriptor
     depthStencilDescriptor->release();
+    
+    // Create Sky Depth Stencil State (always pass, no write - sky always behind)
+    MTL::DepthStencilDescriptor* skyDepthStencilDescriptor = MTL::DepthStencilDescriptor::alloc()->init();
+    skyDepthStencilDescriptor->setDepthCompareFunction(MTL::CompareFunctionAlways); // Always pass
+    skyDepthStencilDescriptor->setDepthWriteEnabled(false); // Don't write depth
+    
+    m_skyDepthStencilState = m_device->newDepthStencilState(skyDepthStencilDescriptor);
+    
+    if (!m_skyDepthStencilState) {
+        std::cerr << "Failed to create sky depth stencil state" << std::endl;
+    }
+    
+    skyDepthStencilDescriptor->release();
     
     // Load Trample Compute Shader
     MTL::Library* computeLibrary = m_device->newDefaultLibrary();
@@ -796,7 +883,7 @@ void Renderer::buildBuffers()
 
 void Renderer::buildInstanceBuffer()
 {
-    const int instanceCount = 20000;  // High density for lush Ghibli look in compact 30x30 area
+    const int instanceCount = 30000;  // High density for lush Ghibli look in compact 30x30 area
     
     // Initialize random number generator
     std::random_device rd;

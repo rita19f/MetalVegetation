@@ -29,14 +29,14 @@ enum TextureIndices {
     TextureIndexTrampleMap = 1
 };
 
-// 顶点结构体 - Alignment safe between C++ and Metal
+// Vertex structure - alignment safe between C++ and Metal
 struct Vertex {
     float3 position;
     float3 normal;
     float2 texcoord;
 };
 
-// 定义每一棵草的数据
+// Instance data for each grass blade
 struct InstanceData {
     float4x4 modelMatrix; 
 };
@@ -44,15 +44,14 @@ struct InstanceData {
 struct Uniforms {
     float4x4 viewMatrix;
     float4x4 projectionMatrix;
-    float3 lightDirection; // 光源方向 (legacy, kept for compatibility)
-    float3 lightColor; // 光源颜色 (legacy, kept for compatibility)
-    float time; // 时间，用于风吹草动
-    float3 cameraPosition; // 相机位置，用于圆柱形广告牌
-    float3 sunDirection; // 太阳方向，用于光照计算
-    float3 sunColor; // 太阳颜色
-    float3 interactorPos; // The world position of the object crushing the grass (legacy, kept for capsule rendering)
-    float interactorRadius; // How wide the crushing effect is (e.g., 2.0) (legacy, kept for capsule rendering)
-    float interactorStrength; // How hard it pushes (e.g., 1.0) (legacy, kept for compatibility)
+    float3 lightDirection; // Light direction (used by ground shader)
+    float3 lightColor; // Light color (used by ground shader)
+    float time; // Time for wind animation
+    float3 cameraPosition; // Camera position for billboard calculations
+    float3 sunDirection; // Sun direction for lighting calculations
+    float3 sunColor; // Sun color
+    float3 interactorPos; // World position of the ball (used for ball shader positioning)
+    float interactorRadius; // Ball radius (used to set ballRadius)
     
     // Trample map system
     float3 ballWorldPos; // Ball center position (world space)
